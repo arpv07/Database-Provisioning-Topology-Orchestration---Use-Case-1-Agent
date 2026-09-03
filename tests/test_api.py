@@ -62,6 +62,26 @@ class TestProvisionValidation:
         assert "job_id" in body
         assert body["status"] == "pending"
 
+    def test_clone_missing_source_cluster_id_rejected(self):
+        payload = {**self.VALID_PAYLOAD, "provisioning_type": "clone"}
+        r = client.post("/api/provision", json=payload, headers=AUTH_HEADERS)
+        assert r.status_code == 400
+        errs = r.json()["detail"]["validation_errors"]
+        assert any("source_cluster_id is required" in e for e in errs)
+
+    def test_clone_valid_source_cluster_id_accepted(self):
+        payload = {**self.VALID_PAYLOAD, "provisioning_type": "clone", "source_cluster_id": "cluster-exa-prod01"}
+        with patch("backend.app._run_provisioning", new_callable=AsyncMock):
+            r = client.post("/api/provision", json=payload, headers=AUTH_HEADERS)
+        assert r.status_code == 202
+
+    def test_list_clone_sources_returns_200(self):
+        r = client.get("/api/topology/clone-sources", headers=AUTH_HEADERS)
+        assert r.status_code == 200
+        sources = r.json()
+        assert len(sources) >= 1
+        assert any(cs["source_cluster_id"] == "cluster-exa-prod01" for cs in sources)
+
     def test_unknown_cluster_id_rejected(self):
         payload = {**self.VALID_PAYLOAD, "target_cluster_id": "cluster-nonexistent"}
         r = client.post("/api/provision", json=payload, headers=AUTH_HEADERS)

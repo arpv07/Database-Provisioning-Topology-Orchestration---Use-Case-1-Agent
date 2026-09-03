@@ -13,7 +13,7 @@ Rules:
 
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
 
 # ─────────────────────────── data transfer objects ───────────────────────────
@@ -24,6 +24,7 @@ class ProvisionRequest:
     db_unique_name: str
     provisioning_type: Literal["seed", "clone"]
     target_cluster_id: str = "cluster-exa-dev01"
+    source_cluster_id: Optional[str] = None
     character_set: str = "AL32UTF8"
     national_character_set: str = "AL16UTF16"
     is_standby: bool = False
@@ -143,6 +144,14 @@ def validate_standby_flags(req: ProvisionRequest) -> list[str]:
     return errors
 
 
+def validate_clone_source(req: ProvisionRequest) -> list[str]:
+    """Ensure source_cluster_id is provided when provisioning_type is clone."""
+    errors: list[str] = []
+    if req.provisioning_type == "clone" and not req.source_cluster_id:
+        errors.append("source_cluster_id is required when provisioning_type is 'clone'.")
+    return errors
+
+
 # ─────────────────────────── public entry point ──────────────────────────────
 
 def validate_provision_request(req: ProvisionRequest) -> ValidationResult:
@@ -159,4 +168,5 @@ def validate_provision_request(req: ProvisionRequest) -> ValidationResult:
         validate_character_sets(req.character_set, req.national_character_set)
     )
     errors.extend(validate_standby_flags(req))
+    errors.extend(validate_clone_source(req))
     return ValidationResult(valid=len(errors) == 0, errors=errors)

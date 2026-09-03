@@ -20,8 +20,21 @@ def test_topology_inventory_loading():
 
 def test_cluster_container_resolution_success():
     tm = TopologyManager()
-    container = tm.resolve_cluster_container("cluster-exa-prod01")
-    assert container == "oracle-exadata-dev"
+    container_prod = tm.resolve_cluster_container("cluster-exa-prod01")
+    assert container_prod == "oracle-source"
+
+    container_dev = tm.resolve_cluster_container("cluster-exa-dev01")
+    assert container_dev == "oracle-exadata-dev"
+
+
+def test_clone_sources_loading():
+    tm = TopologyManager()
+    sources = tm.get_all_clone_sources()
+    assert len(sources) >= 1
+    prod_source = tm.get_clone_source("cluster-exa-prod01")
+    assert prod_source is not None
+    assert prod_source.db_name == "ORD1P"
+    assert prod_source.container_name == "oracle-source"
 
 
 def test_unknown_cluster_rejection():

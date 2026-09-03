@@ -104,6 +104,7 @@ class ProvisionPayload(BaseModel):
     db_name: str = Field(..., json_schema_extra={"example": "mydb1a"})
     db_unique_name: str = Field(..., json_schema_extra={"example": "mydb1a_site1"})
     target_cluster_id: str = Field(..., json_schema_extra={"example": "cluster-exa-dev01"})
+    source_cluster_id: Optional[str] = Field(default=None, json_schema_extra={"example": "cluster-exa-prod01"})
     provisioning_type: Literal["seed", "clone"]
     character_set: str = Field(default="AL32UTF8")
     national_character_set: str = Field(default="AL16UTF16")
@@ -234,6 +235,12 @@ async def get_frame_cluster(frame_id: str):
     return cluster.model_dump()
 
 
+@app.get("/api/topology/clone-sources", tags=["Topology"], dependencies=[Depends(verify_bearer_token)])
+async def list_clone_sources():
+    """List all registered clone source databases across clusters."""
+    return [cs.model_dump() for cs in topology_manager.get_all_clone_sources()]
+
+
 @app.post("/api/provision", status_code=202, tags=["Provisioning"], dependencies=[Depends(verify_bearer_token)])
 async def provision(payload: ProvisionPayload):
     """
@@ -245,10 +252,19 @@ async def provision(payload: ProvisionPayload):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"validation_errors": [str(exc)]})
 
+    # ── Validate clone source if provisioning_type is clone ──
+    if payload.provisioning_type == "clone":
+        if not payload.source_cluster_id:
+            raise HTTPException(status_code=400, detail={"validation_errors": ["source_cluster_id is required when provisioning_type is 'clone'"]})
+        cs = topology_manager.get_clone_source(payload.source_cluster_id)
+        if not cs:
+            raise HTTPException(status_code=400, detail={"validation_errors": [f"Unknown source_cluster_id '{payload.source_cluster_id}'"]})
+
     req = ProvisionRequest(
         db_name=payload.db_name,
         db_unique_name=payload.db_unique_name,
         target_cluster_id=payload.target_cluster_id,
+        source_cluster_id=payload.source_cluster_id,
         provisioning_type=payload.provisioning_type,
         character_set=payload.character_set,
         national_character_set=payload.national_character_set,

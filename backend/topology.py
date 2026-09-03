@@ -1,8 +1,8 @@
 """
 Module: Topology Model
 ================──────
-Models Exadata Frames and Clusters loaded from topology_inventory.yaml.
-Provides container resolution for cluster execution targets.
+Models Exadata Frames, Clusters, and Clone Sources loaded from topology_inventory.yaml.
+Provides container resolution for cluster execution targets and clone sources.
 """
 
 from __future__ import annotations
@@ -24,8 +24,17 @@ class FrameModel(str, Enum):
 class Cluster(BaseModel):
     id: str
     frame_id: str
+    container_name: str = Field(default="oracle-exadata-dev")
     compute_nodes: List[str] = Field(default_factory=list)
     currently_hosted_databases: List[str] = Field(default_factory=list)
+
+
+class CloneSource(BaseModel):
+    db_name: str
+    db_unique_name: str
+    source_cluster_id: str
+    container_name: str
+    environment: str
 
 
 class Frame(BaseModel):
@@ -51,6 +60,7 @@ class TopologyManager:
         self.inventory_path = inventory_path or _INVENTORY_PATH
         self._frames: dict[str, Frame] = {}
         self._clusters: dict[str, Cluster] = {}
+        self._clone_sources: dict[str, CloneSource] = {}
         self.reload()
 
     def reload(self) -> None:
@@ -61,13 +71,20 @@ class TopologyManager:
             data = yaml.safe_load(f) or {}
 
         frames_raw = data.get("frames", [])
+        clone_sources_raw = data.get("clone_sources", [])
+
         self._frames.clear()
         self._clusters.clear()
+        self._clone_sources.clear()
 
         for raw_frame in frames_raw:
             frame = Frame(**raw_frame)
             self._frames[frame.id] = frame
             self._clusters[frame.cluster.id] = frame.cluster
+
+        for raw_source in clone_sources_raw:
+            cs = CloneSource(**raw_source)
+            self._clone_sources[cs.source_cluster_id] = cs
 
     def get_all_frames(self) -> List[Frame]:
         return list(self._frames.values())
@@ -82,17 +99,21 @@ class TopologyManager:
         frame = self.get_frame(frame_id)
         return frame.cluster if frame else None
 
+    def get_all_clone_sources(self) -> List[CloneSource]:
+        return list(self._clone_sources.values())
+
+    def get_clone_source(self, source_cluster_id: str) -> Optional[CloneSource]:
+        return self._clone_sources.get(source_cluster_id)
+
     def resolve_cluster_container(self, cluster_id: str) -> str:
         """
-        Resolves a target_cluster_id to a Docker container name.
+        Resolves a target_cluster_id to its configured Docker container name.
         Enforces that the cluster_id exists in topology.
-        Returns 'oracle-exadata-dev' for local Docker POC.
         """
         cluster = self.get_cluster(cluster_id)
         if not cluster:
             raise ValueError(f"Unknown target_cluster_id '{cluster_id}'")
-        # POC single-container mapping
-        return "oracle-exadata-dev"
+        return cluster.container_name
 
 
 # Global singleton instance

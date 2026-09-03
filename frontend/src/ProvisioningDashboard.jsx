@@ -103,15 +103,6 @@ function LogViewer({ logs, status }) {
 }
 
 // ─────────────────────────── Provision Form ──────────────────────────────────
-const INITIAL_FORM = {
-  db_name: '',
-  db_unique_name: '',
-  target_cluster_id: 'cluster-exa-dev01',
-  provisioning_type: 'seed',
-  character_set: 'AL32UTF8',
-  national_character_set: 'AL16UTF16',
-};
-
 const SAMPLE_CLUSTERS = [
   { id: 'cluster-exa-dev01',  label: 'cluster-exa-dev01 (Frame X11M · us-west-2)' },
   { id: 'cluster-exa-prod01', label: 'cluster-exa-prod01 (Frame X9M · us-east-1)' },
@@ -119,17 +110,33 @@ const SAMPLE_CLUSTERS = [
   { id: 'cluster-exa-stg01',  label: 'cluster-exa-stg01 (Frame X8 · ap-southeast-1)' },
 ];
 
-function ProvisionForm({ onSubmit, loading }) {
-  const [form, setForm] = useState(INITIAL_FORM);
+function ProvisionForm({ onSubmit, loading, cloneSources = [] }) {
+  const [form, setForm] = useState({
+    db_name: 'mydb1a',
+    db_unique_name: 'mydb1a_site1',
+    target_cluster_id: 'cluster-exa-dev01',
+    source_cluster_id: 'cluster-exa-prod01',
+    provisioning_type: 'seed',
+    character_set: 'AL32UTF8',
+    national_character_set: 'AL16UTF16',
+    is_standby: false,
+    create_standby: false,
+    dataguard_enabled: false,
+  });
   const [errors, setErrors] = useState({});
 
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const set = (key) => (e) => {
+    const val = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
+    setForm((f) => ({ ...f, [key]: val }));
+    if (errors[key]) setErrors((errs) => ({ ...errs, [key]: null }));
+  };
 
   const validate = () => {
     const errs = {};
-    const { db_name, db_unique_name, target_cluster_id } = form;
+    const { db_name, db_unique_name, target_cluster_id, provisioning_type, source_cluster_id } = form;
 
     if (!target_cluster_id) errs.target_cluster_id = 'Target cluster required.';
+    if (provisioning_type === 'clone' && !source_cluster_id) errs.source_cluster_id = 'Source cluster required for clone.';
 
     if (!db_name) {
       errs.db_name = 'Required.';
@@ -220,6 +227,25 @@ function ProvisionForm({ onSubmit, loading }) {
           ))}
         </div>
       </div>
+
+      {/* Clone Source Selection */}
+      {form.provisioning_type === 'clone' && (
+        <Field id="source_cluster_id" label="Clone Source Database" hint="Select source database to clone FROM ACTIVE DATABASE">
+          <select
+            id="source_cluster_id"
+            value={form.source_cluster_id || ''}
+            onChange={set('source_cluster_id')}
+            className="w-full rounded-lg bg-white/5 border border-white/10 px-3 py-2.5 text-xs text-white font-mono focus:outline-none focus:border-cyan-500/60"
+          >
+            <option value="" className="bg-slate-900 text-gray-400">Select clone source...</option>
+            {cloneSources.map((cs) => (
+              <option key={cs.source_cluster_id} value={cs.source_cluster_id} className="bg-slate-900 text-white">
+                {cs.db_name} ({cs.db_unique_name}) — {cs.source_cluster_id} [{cs.environment}]
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
 
       {/* DB Name */}
       <Field id="db_name" label="DB Name" hint="≤8 chars · letters+digits · must not end in digit">
@@ -342,7 +368,22 @@ export default function ProvisioningDashboard() {
   const [loading, setLoading]         = useState(false);
   const [toast, setToast]             = useState(null);
   const [healthy, setHealthy]         = useState(null);
+  const [cloneSources, setCloneSources] = useState([]);
   const eventSourceRef = useRef(null);
+
+  // ── fetch clone sources ──
+  useEffect(() => {
+    const fetchSources = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/topology/clone-sources`, { headers: authHeaders });
+        if (r.ok) {
+          const data = await r.json();
+          setCloneSources(data);
+        }
+      } catch {}
+    };
+    fetchSources();
+  }, []);
 
   // ── health check ──
   useEffect(() => {
@@ -476,7 +517,7 @@ export default function ProvisioningDashboard() {
         {/* ── Left: Provision Form ── */}
         <aside className="border-r border-white/6 p-5 overflow-y-auto">
           <p className="text-xs font-semibold uppercase tracking-widest text-gray-500 mb-4">New Provision Request</p>
-          <ProvisionForm onSubmit={handleSubmit} loading={loading} />
+          <ProvisionForm onSubmit={handleSubmit} loading={loading} cloneSources={cloneSources} />
         </aside>
 
         {/* ── Center: Log Viewer ── */}

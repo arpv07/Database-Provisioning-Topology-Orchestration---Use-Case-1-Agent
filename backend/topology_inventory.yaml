@@ -9,6 +9,7 @@ frames:
     cluster:
       id: "cluster-exa-prod01"
       frame_id: "frame-exadata-01"
+      container_name: "oracle-source"
       compute_nodes:
         - "dbnode01.compute.local"
         - "dbnode02.compute.local"
@@ -27,6 +28,7 @@ frames:
     cluster:
       id: "cluster-exa-dev01"
       frame_id: "frame-exadata-02"
+      container_name: "oracle-exadata-dev"
       compute_nodes:
         - "dbnode03.compute.local"
       currently_hosted_databases:
@@ -42,6 +44,7 @@ frames:
     cluster:
       id: "cluster-exa-test01"
       frame_id: "frame-exadata-03"
+      container_name: "oracle-exadata-dev"
       compute_nodes:
         - "dbnode04.compute.local"
         - "dbnode05.compute.local"
@@ -57,7 +60,21 @@ frames:
     cluster:
       id: "cluster-exa-stg01"
       frame_id: "frame-exadata-04"
+      container_name: "oracle-exadata-dev"
       compute_nodes:
         - "dbnode06.compute.local"
       currently_hosted_databases:
         - "STG1S"
+
+clone_sources:
+  - db_name: "ORD1P"
+    db_unique_name: "ORD1P_SITE1"
+    source_cluster_id: "cluster-exa-prod01"
+    container_name: "oracle-source"
+    environment: "Production"
+
+  - db_name: "DEV1D"
+    db_unique_name: "DEV1D_SITE1"
+    source_cluster_id: "cluster-exa-dev01"
+    container_name: "oracle-exadata-dev"
+    environment: "Development"

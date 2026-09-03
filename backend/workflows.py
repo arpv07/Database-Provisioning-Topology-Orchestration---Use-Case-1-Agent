@@ -27,6 +27,7 @@ from collections.abc import AsyncGenerator, Generator
 from typing import Optional
 
 from .docker_controller import DockerController
+from .topology import topology_manager
 from .validation_engine import ProvisionRequest
 
 # ─────────────────────────── shared helpers ──────────────────────────────────
@@ -109,7 +110,7 @@ _DBCA_RESPONSE_TEMPLATE = textwrap.dedent("""\
     DBSNMPPASSWORD         = "{dbsnmp_password}"
 """)
 
-# RMAN duplicate script using /backups volume
+# RMAN duplicate script using /backups volume or active database
 _RMAN_DUPLICATE_TEMPLATE = textwrap.dedent("""\
     -- Autonomous Recovery Service Duplicate (Docker Volume /backups)
     RUN {{
@@ -121,6 +122,19 @@ _RMAN_DUPLICATE_TEMPLATE = textwrap.dedent("""\
                 GROUP 1 ('{staging_dir}/{db_name}/redo01.log') SIZE 200M,
                 GROUP 2 ('{staging_dir}/{db_name}/redo02.log') SIZE 200M,
                 GROUP 3 ('{staging_dir}/{db_name}/redo03.log') SIZE 200M
+            NOFILENAMECHECK;
+    }}
+""")
+
+_RMAN_DUPLICATE_ACTIVE_TEMPLATE = textwrap.dedent("""\
+    -- RMAN Duplicate FROM ACTIVE DATABASE across Exadata Clusters
+    RUN {{
+        ALLOCATE CHANNEL ch1 DEVICE TYPE DISK;
+        ALLOCATE AUXILIARY CHANNEL aux1 DEVICE TYPE DISK;
+        DUPLICATE TARGET DATABASE TO '{db_name}'
+            FROM ACTIVE DATABASE
+            PASSWORD FILE
+            SPFILE
             NOFILENAMECHECK;
     }}
 """)
@@ -225,14 +239,20 @@ async def clone_database(
     Workflow 2 – Clone / ARS Emulation (RMAN Duplicate).
 
     Steps:
-      1. Register database with RMAN Catalog.
-      2. Perform safety path validation & wipe existing files.
-      3. Run RMAN DUPLICATE USING BACKUPSET from /backups.
+      1. Resolve clone source from topology.
+      2. Register database with RMAN Catalog.
+      3. Perform safety path validation & wipe existing files.
+      4. Run RMAN DUPLICATE FROM ACTIVE DATABASE or BACKUPSET.
     """
     db_name = req.db_name.upper()
     db_unique_name = req.db_unique_name.upper()
 
-    yield f"[CLONE] ▶  Starting ARS-emulation clone for SID={db_name}"
+    source_cs = topology_manager.get_clone_source(req.source_cluster_id) if req.source_cluster_id else None
+    source_db_name = source_cs.db_name if source_cs else "SOURCE_DB"
+    source_cluster = req.source_cluster_id or "cluster-exa-prod01"
+    source_container = source_cs.container_name if source_cs else "oracle-source"
+
+    yield f"[CLONE] ▶  Starting RMAN clone for target SID={db_name} from source SID={source_db_name} ({source_cluster} / container={source_container})"
 
     # ── Guard check ─────────────────────────────────────────────────────────
     if req.is_standby or req.create_standby or req.dataguard_enabled:
@@ -259,12 +279,13 @@ async def clone_database(
     yield f"[CLONE]    Staging directory cleared."
 
     # ── Step 3: Run RMAN DUPLICATE ──────────────────────────────────────────
-    rman_script = _RMAN_DUPLICATE_TEMPLATE.format(
-        db_name=db_name,
-        staging_dir=STAGING_DIR,
-    )
+    if source_cs:
+        rman_script = _RMAN_DUPLICATE_ACTIVE_TEMPLATE.format(db_name=db_name)
+        yield f"[CLONE] ── Running RMAN DUPLICATE FROM ACTIVE DATABASE '{source_db_name}' …"
+    else:
+        rman_script = _RMAN_DUPLICATE_TEMPLATE.format(db_name=db_name, staging_dir=STAGING_DIR)
+        yield "[CLONE] ── Running RMAN DUPLICATE FROM '/backups' …"
 
-    yield "[CLONE] ── Running RMAN DUPLICATE FROM '/backups' …"
     for line in controller.exec_rman(rman_script, db_name=db_name):
         yield f"[CLONE]    {line}"
 
