@@ -389,7 +389,7 @@ export default function ProvisioningDashboard() {
   const startStream = useCallback((jobId) => {
     if (eventSourceRef.current) eventSourceRef.current.close();
     setStreamLogs([]);
-    const es = new EventSource(`${API_BASE}/api/jobs/${jobId}/stream`);
+    const es = new EventSource(`${API_BASE}/api/jobs/${jobId}/stream?token=${encodeURIComponent(API_KEY)}`);
     eventSourceRef.current = es;
 
     es.onmessage = (e) => {

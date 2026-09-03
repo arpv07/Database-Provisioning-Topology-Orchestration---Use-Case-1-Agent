@@ -22,7 +22,7 @@ from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Security
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -281,9 +281,14 @@ async def provision(payload: ProvisionPayload):
     return {"job_id": job_id, "status": "pending"}
 
 
-@app.get("/api/jobs/{job_id}/stream", tags=["Provisioning"], dependencies=[Depends(verify_bearer_token)])
-async def stream_job(job_id: str):
+@app.get("/api/jobs/{job_id}/stream", tags=["Provisioning"])
+async def stream_job(job_id: str, token: Optional[str] = Query(None)):
     """Server-Sent Events stream for a specific job."""
+    if not token or token != PROVISIONING_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing Bearer token query parameter",
+        )
     if job_store.get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="Job not found")
 

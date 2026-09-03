@@ -40,3 +40,18 @@ def test_provision_endpoint_missing_token_returns_401():
     r = client.post("/api/provision", json=payload)
     assert r.status_code == 401
     assert "Invalid or missing Bearer token" in r.json()["detail"]
+
+
+def test_sse_stream_missing_token_returns_401():
+    r = client.get("/api/jobs/test-job-id/stream")
+    assert r.status_code == 401
+
+
+def test_sse_stream_invalid_token_returns_401():
+    r = client.get("/api/jobs/test-job-id/stream?token=wrong-key")
+    assert r.status_code == 401
+
+
+def test_sse_stream_valid_token_accepted():
+    r = client.get(f"/api/jobs/non-existent-job/stream?token={VALID_TOKEN}")
+    assert r.status_code == 404
