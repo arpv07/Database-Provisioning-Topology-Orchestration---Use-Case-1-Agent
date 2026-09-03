@@ -1,0 +1,63 @@
+frames:
+  - id: "frame-exadata-01"
+    model: "X9M"
+    datacenter: "us-east-1"
+    storage_servers:
+      - "cel01.storage.local"
+      - "cel02.storage.local"
+      - "cel03.storage.local"
+    cluster:
+      id: "cluster-exa-prod01"
+      frame_id: "frame-exadata-01"
+      compute_nodes:
+        - "dbnode01.compute.local"
+        - "dbnode02.compute.local"
+      currently_hosted_databases:
+        - "ORD1P"
+        - "ORD2P"
+
+  - id: "frame-exadata-02"
+    model: "X11M"
+    datacenter: "us-west-2"
+    storage_servers:
+      - "cel04.storage.local"
+      - "cel05.storage.local"
+      - "cel06.storage.local"
+      - "cel07.storage.local"
+    cluster:
+      id: "cluster-exa-dev01"
+      frame_id: "frame-exadata-02"
+      compute_nodes:
+        - "dbnode03.compute.local"
+      currently_hosted_databases:
+        - "DEV1D"
+
+  - id: "frame-exadata-03"
+    model: "X8M"
+    datacenter: "eu-central-1"
+    storage_servers:
+      - "cel08.storage.local"
+      - "cel09.storage.local"
+      - "cel10.storage.local"
+    cluster:
+      id: "cluster-exa-test01"
+      frame_id: "frame-exadata-03"
+      compute_nodes:
+        - "dbnode04.compute.local"
+        - "dbnode05.compute.local"
+      currently_hosted_databases: []
+
+  - id: "frame-exadata-04"
+    model: "X8"
+    datacenter: "ap-southeast-1"
+    storage_servers:
+      - "cel11.storage.local"
+      - "cel12.storage.local"
+      - "cel13.storage.local"
+    cluster:
+      id: "cluster-exa-stg01"
+      frame_id: "frame-exadata-04"
+      compute_nodes:
+        - "dbnode06.compute.local"
+      currently_hosted_databases:
+        - "STG1S"

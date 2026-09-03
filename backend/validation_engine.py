@@ -8,6 +8,7 @@ Docker execution is attempted.
 Rules:
   db_name        – ≤8 chars, alphanumeric, no special chars, must NOT end in digit
   db_unique_name – ≤15 chars, alphanumeric + underscore only, must NOT end in digit
+  clone_guard    – clone workflow cannot be used with standby/dataguard flags
 """
 
 import re
@@ -22,8 +23,12 @@ class ProvisionRequest:
     db_name: str
     db_unique_name: str
     provisioning_type: Literal["seed", "clone"]
+    target_cluster_id: str = "cluster-exa-dev01"
     character_set: str = "AL32UTF8"
     national_character_set: str = "AL16UTF16"
+    is_standby: bool = False
+    create_standby: bool = False
+    dataguard_enabled: bool = False
 
 
 @dataclass
@@ -126,6 +131,18 @@ def validate_character_sets(
     return errors
 
 
+def validate_standby_flags(req: ProvisionRequest) -> list[str]:
+    """Ensure clone path is never used to create standby/Data Guard databases."""
+    errors: list[str] = []
+    if req.provisioning_type == "clone" and (
+        req.is_standby or req.create_standby or req.dataguard_enabled
+    ):
+        errors.append(
+            "Clone workflow cannot be used to create a standby database or enable Data Guard."
+        )
+    return errors
+
+
 # ─────────────────────────── public entry point ──────────────────────────────
 
 def validate_provision_request(req: ProvisionRequest) -> ValidationResult:
@@ -141,4 +158,5 @@ def validate_provision_request(req: ProvisionRequest) -> ValidationResult:
     errors.extend(
         validate_character_sets(req.character_set, req.national_character_set)
     )
+    errors.extend(validate_standby_flags(req))
     return ValidationResult(valid=len(errors) == 0, errors=errors)

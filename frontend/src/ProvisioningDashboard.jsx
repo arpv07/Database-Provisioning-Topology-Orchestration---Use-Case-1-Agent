@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+const API_KEY = import.meta.env.VITE_PROVISIONING_API_KEY || 'dev-secret-key-123';
+
+const authHeaders = {
+  'Content-Type': 'application/json',
+  'Authorization': `Bearer ${API_KEY}`,
+};
 
 // ─────────────────────────── tiny helpers ────────────────────────────────────
 const statusColors = {
@@ -41,7 +47,7 @@ function JobCard({ job, onSelect, isSelected }) {
           {job.provisioning_type === 'seed' ? '⬡ Seed' : '⎘ Clone'}
         </span>
         <span>·</span>
-        <span>{new Date(job.created_at).toLocaleTimeString()}</span>
+        <span className="font-mono text-gray-400">{job.target_cluster_id}</span>
       </div>
     </button>
   );
@@ -100,10 +106,18 @@ function LogViewer({ logs, status }) {
 const INITIAL_FORM = {
   db_name: '',
   db_unique_name: '',
+  target_cluster_id: 'cluster-exa-dev01',
   provisioning_type: 'seed',
   character_set: 'AL32UTF8',
   national_character_set: 'AL16UTF16',
 };
+
+const SAMPLE_CLUSTERS = [
+  { id: 'cluster-exa-dev01',  label: 'cluster-exa-dev01 (Frame X11M · us-west-2)' },
+  { id: 'cluster-exa-prod01', label: 'cluster-exa-prod01 (Frame X9M · us-east-1)' },
+  { id: 'cluster-exa-test01', label: 'cluster-exa-test01 (Frame X8M · eu-central-1)' },
+  { id: 'cluster-exa-stg01',  label: 'cluster-exa-stg01 (Frame X8 · ap-southeast-1)' },
+];
 
 function ProvisionForm({ onSubmit, loading }) {
   const [form, setForm] = useState(INITIAL_FORM);
@@ -113,14 +127,16 @@ function ProvisionForm({ onSubmit, loading }) {
 
   const validate = () => {
     const errs = {};
-    const { db_name, db_unique_name } = form;
+    const { db_name, db_unique_name, target_cluster_id } = form;
+
+    if (!target_cluster_id) errs.target_cluster_id = 'Target cluster required.';
 
     if (!db_name) {
       errs.db_name = 'Required.';
     } else {
       if (db_name.length > 8) errs.db_name = 'Must be ≤ 8 characters.';
       else if (!/^[A-Za-z0-9]+$/.test(db_name)) errs.db_name = 'Letters and digits only.';
-      else if (!/[A-Za-z]/.test(db_name) || !/[0-9]/.test(db_name)) errs.db_name = 'Must contain both letters AND digits.';
+      else if (!/[A-Za-z]/.test(db_name) || !/[0-9]/.test(db_name)) errs.db_name = 'Must contain BOTH letters AND digits.';
       else if (/[0-9]$/.test(db_name)) errs.db_name = 'Must NOT end with a digit.';
     }
 
@@ -129,7 +145,7 @@ function ProvisionForm({ onSubmit, loading }) {
     } else {
       if (db_unique_name.length > 15) errs.db_unique_name = 'Must be ≤ 15 characters.';
       else if (!/^[A-Za-z0-9_]+$/.test(db_unique_name)) errs.db_unique_name = 'Letters, digits, underscore only.';
-      else if (!/[A-Za-z]/.test(db_unique_name) || !/[0-9]/.test(db_unique_name)) errs.db_unique_name = 'Must contain both letters AND digits.';
+      else if (!/[A-Za-z]/.test(db_unique_name) || !/[0-9]/.test(db_unique_name)) errs.db_unique_name = 'Must contain BOTH letters AND digits.';
       else if (/[0-9]$/.test(db_unique_name)) errs.db_unique_name = 'Must NOT end with a digit.';
     }
 
@@ -158,6 +174,22 @@ function ProvisionForm({ onSubmit, loading }) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
+
+      {/* Target Cluster */}
+      <Field id="target_cluster_id" label="Target Exadata Cluster" hint="Resolved against topology inventory">
+        <select
+          id="target_cluster_id"
+          value={form.target_cluster_id}
+          onChange={set('target_cluster_id')}
+          className="w-full rounded-lg bg-white/5 border border-white/10 px-3 py-2.5 text-xs text-white font-mono focus:outline-none focus:border-blue-500/60"
+        >
+          {SAMPLE_CLUSTERS.map((c) => (
+            <option key={c.id} value={c.id} className="bg-slate-900 text-white">
+              {c.label}
+            </option>
+          ))}
+        </select>
+      </Field>
 
       {/* Provisioning Type */}
       <div>
@@ -330,7 +362,7 @@ export default function ProvisioningDashboard() {
   useEffect(() => {
     const poll = async () => {
       try {
-        const r = await fetch(`${API_BASE}/api/jobs`);
+        const r = await fetch(`${API_BASE}/api/jobs`, { headers: authHeaders });
         const d = await r.json();
         const all = [
           ...(d.running   || []),
@@ -339,7 +371,6 @@ export default function ProvisioningDashboard() {
           ...(d.failed    || []),
         ];
         setJobs(all);
-        // Sync selected job logs if terminal
         if (selectedJob) {
           const updated = all.find((j) => j.job_id === selectedJob.job_id);
           if (updated && ['completed','failed'].includes(updated.status)) {
@@ -392,7 +423,7 @@ export default function ProvisioningDashboard() {
     try {
       const r = await fetch(`${API_BASE}/api/provision`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify(form),
       });
       const d = await r.json();
@@ -402,9 +433,8 @@ export default function ProvisioningDashboard() {
         return;
       }
       showToast(`Job ${d.job_id.slice(0, 8)}… enqueued.`, 'success');
-      // Immediately start streaming
       startStream(d.job_id);
-      setSelectedJob({ job_id: d.job_id, db_name: form.db_name, status: 'pending', logs: [] });
+      setSelectedJob({ job_id: d.job_id, db_name: form.db_name, target_cluster_id: form.target_cluster_id, status: 'pending', logs: [] });
     } catch (e) {
       showToast(`Network error: ${e.message}`, 'error');
     } finally {
@@ -434,18 +464,18 @@ export default function ProvisioningDashboard() {
           </div>
           <div>
             <h1 className="text-sm font-bold text-white tracking-tight">Oracle DB Provisioning Agent</h1>
-            <p className="text-xs text-gray-500">Autonomous Exadata Orchestration</p>
+            <p className="text-xs text-gray-500">Autonomous Exadata Topology Orchestration</p>
           </div>
         </div>
         <HealthDot healthy={healthy} />
       </header>
 
       {/* Main layout */}
-      <div className="grid grid-cols-[300px_1fr_280px] gap-0 h-[calc(100vh-65px)]">
+      <div className="grid grid-cols-[320px_1fr_280px] gap-0 h-[calc(100vh-65px)]">
 
         {/* ── Left: Provision Form ── */}
         <aside className="border-r border-white/6 p-5 overflow-y-auto">
-          <p className="text-xs font-semibold uppercase tracking-widest text-gray-500 mb-4">New Provision</p>
+          <p className="text-xs font-semibold uppercase tracking-widest text-gray-500 mb-4">New Provision Request</p>
           <ProvisionForm onSubmit={handleSubmit} loading={loading} />
         </aside>
 
@@ -456,6 +486,7 @@ export default function ProvisioningDashboard() {
               <span className="font-mono text-sm font-semibold text-white">{selectedJob.db_name}</span>
               <StatusBadge status={selectedJob.status} />
               <span className="text-xs text-gray-600 font-mono">{selectedJob.job_id?.slice(0,8)}…</span>
+              <span className="text-xs text-blue-400 font-mono">[{selectedJob.target_cluster_id}]</span>
             </div>
           )}
           <div className="flex-1 overflow-hidden">

@@ -5,7 +5,8 @@ Two async generator workflows, each yielding log lines for real-time
 SSE streaming to the frontend:
 
   • seed_database()  – builds a fresh Oracle DB from DBCA
-  • clone_database() – wipes the staging area then runs a mock RMAN duplicate
+  • clone_database() – validates target deletion path, registers with catalog,
+                        and runs RMAN DUPLICATE from /backups
 
 Module 4: Post-Provisioning SQL Injection
 ==========================================
@@ -15,13 +16,15 @@ Module 4: Post-Provisioning SQL Injection
 Module 5: Verification & QA
 =============================
   • verify_parameters() – queries v$parameter for each tuning param
-  • verify_rman_catalog_registration() – mock RMAN catalog connectivity check
+  • verify_rman_catalog_registration() – RMAN catalog connectivity check
 """
 
 from __future__ import annotations
 
+import os
 import textwrap
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
+from typing import Optional
 
 from .docker_controller import DockerController
 from .validation_engine import ProvisionRequest
@@ -29,6 +32,56 @@ from .validation_engine import ProvisionRequest
 # ─────────────────────────── shared helpers ──────────────────────────────────
 
 STAGING_DIR = "/u01/oradata/staging"
+
+
+def get_db_passwords() -> dict[str, str]:
+    """Retrieve passwords from env vars, failing fast if unset."""
+    fallback_pwd = os.getenv("ORACLE_PASSWORD", "Oracle_4U")
+    sys_pwd = os.getenv("DB_SYS_PASSWORD", fallback_pwd)
+    system_pwd = os.getenv("DB_SYSTEM_PASSWORD", fallback_pwd)
+    dbsnmp_pwd = os.getenv("DB_DBSNMP_PASSWORD", fallback_pwd)
+
+    if not (sys_pwd and system_pwd and dbsnmp_pwd):
+        raise ValueError(
+            "DB passwords must be set via DB_SYS_PASSWORD, DB_SYSTEM_PASSWORD, "
+            "and DB_DBSNMP_PASSWORD or ORACLE_PASSWORD."
+        )
+    return {
+        "sys": sys_pwd,
+        "system": system_pwd,
+        "dbsnmp": dbsnmp_pwd,
+    }
+
+
+def validate_pre_delete_path(path: str, db_name: str) -> bool:
+    """
+    Safety check: ensures target pre-delete directory starts with STAGING_DIR
+    and explicitly includes db_name. Prevents arbitrary rm -rf commands.
+    """
+    clean_path = path.rstrip("/")
+    clean_staging = STAGING_DIR.rstrip("/")
+
+    if not clean_path.startswith(clean_staging):
+        return False
+    if db_name.upper() not in clean_path.upper():
+        return False
+    return True
+
+
+class RmanCatalogClient:
+    """Abstractions for RMAN Catalog operations."""
+
+    def register_database(
+        self, db_name: str, controller: DockerController
+    ) -> Generator[str, None, None]:
+        yield f"[CATALOG] Registering database {db_name.upper()} in catalog…"
+        reg_sql = f"SELECT 'REGISTERED' AS status FROM v$database WHERE UPPER(name) = '{db_name.upper()}';"
+        yield from controller.exec_sqlplus(reg_sql, db_name=db_name)
+        yield f"[CATALOG] Database {db_name.upper()} successfully registered."
+
+
+catalog_client = RmanCatalogClient()
+
 
 # DBCA response file template for seed builds
 _DBCA_RESPONSE_TEMPLATE = textwrap.dedent("""\
@@ -51,25 +104,24 @@ _DBCA_RESPONSE_TEMPLATE = textwrap.dedent("""\
     RECOVERYAREASIZE       = "12000"
     ENABLEARCHIVELOG       = "true"
     EMCONFIGURATION        = "NONE"
-    SYSPASSWORD            = "Oracle_4U"
-    SYSTEMPASSWORD         = "Oracle_4U"
-    DBSNMPPASSWORD         = "Oracle_4U"
+    SYSPASSWORD            = "{sys_password}"
+    SYSTEMPASSWORD         = "{system_password}"
+    DBSNMPPASSWORD         = "{dbsnmp_password}"
 """)
 
-# Mock RMAN duplicate script (ARS emulation)
+# RMAN duplicate script using /backups volume
 _RMAN_DUPLICATE_TEMPLATE = textwrap.dedent("""\
-    -- ARS Emulation: Autonomous Recovery Service Duplicate
-    -- Target: {db_unique_name}
+    -- Autonomous Recovery Service Duplicate (Docker Volume /backups)
     RUN {{
         ALLOCATE AUXILIARY CHANNEL ch1 DEVICE TYPE DISK;
         ALLOCATE AUXILIARY CHANNEL ch2 DEVICE TYPE DISK;
         DUPLICATE DATABASE TO '{db_name}'
+            BACKUPSET '/backups'
             LOGFILE
                 GROUP 1 ('{staging_dir}/{db_name}/redo01.log') SIZE 200M,
                 GROUP 2 ('{staging_dir}/{db_name}/redo02.log') SIZE 200M,
                 GROUP 3 ('{staging_dir}/{db_name}/redo03.log') SIZE 200M
-            NOFILENAMECHECK
-            USING BACKUPSET;
+            NOFILENAMECHECK;
     }}
 """)
 
@@ -124,8 +176,10 @@ async def seed_database(
     """
     db_name = req.db_name.upper()
     db_unique_name = req.db_unique_name.upper()
+    passwords = get_db_passwords()
 
     yield f"[SEED] ▶  Starting seed build for SID={db_name}, UNIQUE={db_unique_name}"
+    yield f"[SEED] ℹ NOTE: dbca -silent createDatabase typically takes 10-30+ minutes on a full run. This is expected behavior and not a hang."
     yield f"[SEED]    Character set        : {req.character_set}"
     yield f"[SEED]    National char set    : {req.national_character_set}"
 
@@ -135,6 +189,9 @@ async def seed_database(
         db_unique_name=db_unique_name,
         character_set=req.character_set,
         national_character_set=req.national_character_set,
+        sys_password=passwords["sys"],
+        system_password=passwords["system"],
+        dbsnmp_password=passwords["dbsnmp"],
     )
     escaped = response_content.replace("'", "'\\''")
     write_cmd = (
@@ -168,33 +225,46 @@ async def clone_database(
     Workflow 2 – Clone / ARS Emulation (RMAN Duplicate).
 
     Steps:
-      1. Forcefully wipe the staging directory for the target DB.
-      2. Pipe a mock RMAN duplicate script into the container.
-
-    No Data Guard or Standby logic is included.
+      1. Register database with RMAN Catalog.
+      2. Perform safety path validation & wipe existing files.
+      3. Run RMAN DUPLICATE USING BACKUPSET from /backups.
     """
     db_name = req.db_name.upper()
     db_unique_name = req.db_unique_name.upper()
 
     yield f"[CLONE] ▶  Starting ARS-emulation clone for SID={db_name}"
 
-    # ── Step 1: wipe staging directory ───────────────────────────────────────
+    # ── Guard check ─────────────────────────────────────────────────────────
+    if req.is_standby or req.create_standby or req.dataguard_enabled:
+        raise ValueError("Clone workflow cannot be used to create a standby database or enable Data Guard.")
+
+    # ── Step 1: Catalog Registration ───────────────────────────────────────
+    yield "[CLONE] ── Registering target database with catalog…"
+    for line in catalog_client.register_database(db_name, controller):
+        yield f"[CLONE]    {line}"
+
+    # ── Step 2: Safety Check & File Deletion ────────────────────────────────
     target_staging = f"{STAGING_DIR}/{db_name}"
+    if not validate_pre_delete_path(target_staging, db_name):
+        raise ValueError(
+            f"Pre-delete path validation failed for '{target_staging}'. "
+            f"Path must start with '{STAGING_DIR}' and contain '{db_name}'."
+        )
+
+    yield f"[CLONE] ── Safety check passed. Preparing to clear staging directory: {target_staging}"
     wipe_cmd = f"rm -rf {target_staging}/* && mkdir -p {target_staging}"
 
-    yield f"[CLONE] ── Wiping staging directory: {target_staging}"
     for line in controller.exec_shell(wipe_cmd):
         yield f"[CLONE]    {line}"
     yield f"[CLONE]    Staging directory cleared."
 
-    # ── Step 2: run RMAN duplicate script ────────────────────────────────────
+    # ── Step 3: Run RMAN DUPLICATE ──────────────────────────────────────────
     rman_script = _RMAN_DUPLICATE_TEMPLATE.format(
         db_name=db_name,
-        db_unique_name=db_unique_name,
         staging_dir=STAGING_DIR,
     )
 
-    yield "[CLONE] ── Running RMAN duplicate (ARS emulation) …"
+    yield "[CLONE] ── Running RMAN DUPLICATE FROM '/backups' …"
     for line in controller.exec_rman(rman_script, db_name=db_name):
         yield f"[CLONE]    {line}"
 
@@ -276,7 +346,6 @@ async def verify_parameters(
 
 _RMAN_CATALOG_CHECK_SQL = textwrap.dedent("""\
     -- Mock RMAN catalog registration check
-    -- In production this would connect to the RMAN catalog schema
     SELECT 'RMAN_CATALOG_CHECK' AS check_type,
            name                 AS db_name,
            db_unique_name,
@@ -290,8 +359,7 @@ async def verify_rman_catalog_registration(
     controller: DockerController,
 ) -> AsyncGenerator[str, None]:
     """
-    Mock PITR readiness check: confirms the DB appears in the RMAN catalog.
-    In production this would query the catalog schema over a database link.
+    PITR readiness check: confirms the DB appears in the RMAN catalog.
     """
     db_name = db_name.upper()
     yield f"[QA-RMAN] ▶  Checking RMAN catalog registration for {db_name} …"

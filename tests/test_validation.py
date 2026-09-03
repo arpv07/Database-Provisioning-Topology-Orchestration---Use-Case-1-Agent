@@ -1,6 +1,6 @@
 """
 Unit tests for the Validation Engine (Module 1).
-Run with:  pytest oracle_provisioner/tests/test_validation.py -v
+Run with:  pytest tests/test_validation.py -v
 """
 
 import pytest
@@ -117,6 +117,26 @@ class TestValidateProvisionRequest:
         result = validate_provision_request(
             self._make(db_name="toolongname!!", db_unique_name="ends_in_2")
         )
-        # Both fields should have errors
         assert result.valid is False
         assert len(result.errors) >= 2
+
+    def test_clone_standby_flag_rejected(self):
+        req = ProvisionRequest(
+            db_name="mydb1a",
+            db_unique_name="mydb1a_sitea",
+            provisioning_type="clone",
+            is_standby=True
+        )
+        result = validate_provision_request(req)
+        assert result.valid is False
+        assert any("standby database or enable Data Guard" in e for e in result.errors)
+
+    def test_seed_standby_flag_allowed(self):
+        req = ProvisionRequest(
+            db_name="mydb1a",
+            db_unique_name="mydb1a_sitea",
+            provisioning_type="seed",
+            is_standby=True
+        )
+        result = validate_provision_request(req)
+        assert result.valid is True

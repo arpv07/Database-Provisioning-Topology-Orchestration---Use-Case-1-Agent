@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  oracle-source:
+    image: gvenzl/oracle-free:23-slim
+    container_name: oracle-source
+    environment:
+      - ORACLE_PASSWORD=Oracle_4U
+    ports:
+      - "1522:1521"
+    volumes:
+      - ars_backups:/backups
+    healthcheck:
+      test: ["CMD", "sqlplus", "-L", "system/Oracle_4U@localhost:1521/FREE", "SELECT 1 FROM DUAL;"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  oracle-exadata-dev:
+    image: gvenzl/oracle-free:23-slim
+    container_name: oracle-exadata-dev
+    entrypoint: ["/bin/bash", "-c", "tail -f /dev/null"]
+    ports:
+      - "1521:1521"
+    volumes:
+      - ars_backups:/backups
+
+volumes:
+  ars_backups:
+    name: ars_backups

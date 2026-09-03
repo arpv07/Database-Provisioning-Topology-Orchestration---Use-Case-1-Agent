@@ -2,10 +2,13 @@
 FastAPI Application – Oracle DB Provisioning Agent
 ====================================================
 Routes:
-  POST /api/provision        – launch a seed or clone job (SSE stream)
-  GET  /api/jobs             – list all jobs (queue state)
-  GET  /api/jobs/{job_id}    – single job detail
-  GET  /api/health           – Docker container health check
+  POST /api/provision                 – launch a seed or clone job (SSE stream)
+  GET  /api/jobs                      – list all jobs (queue state)
+  GET  /api/jobs/{job_id}             – single job detail
+  GET  /api/jobs/{job_id}/stream      – stream job logs over SSE
+  GET  /api/topology/frames           – list Exadata frames
+  GET  /api/topology/frames/{id}/cluster – get cluster for frame
+  GET  /api/health                    – Docker container health check
 """
 
 from __future__ import annotations
@@ -13,16 +16,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
+from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from .docker_controller import DockerController, DockerExecutionError
+from .job_store import JobRecord, job_store
+from .topology import topology_manager
 from .validation_engine import ProvisionRequest, validate_provision_request
 from .workflows import (
     apply_post_provision_parameters,
@@ -40,29 +48,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger("oracle_provisioner")
 
-# ─────────────────────────── in-memory job store ─────────────────────────────
-
-JobStatus = Literal["pending", "running", "completed", "failed"]
-
-
-class Job(BaseModel):
-    job_id: str
-    db_name: str
-    db_unique_name: str
-    provisioning_type: str
-    status: JobStatus
-    created_at: str
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    logs: list[str] = Field(default_factory=list)
-    error: Optional[str] = None
-
-
-_jobs: dict[str, Job] = {}
-
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ─────────────────────────── Security & Auth ─────────────────────────────────
+
+PROVISIONING_API_KEY = os.getenv("PROVISIONING_API_KEY", "dev-secret-key-123")
+security_bearer = HTTPBearer(auto_error=False)
+
+
+async def verify_bearer_token(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
+) -> str:
+    token = credentials.credentials if credentials else None
+    if not token or token != PROVISIONING_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing Bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return token
 
 
 # ─────────────────────────── FastAPI app ─────────────────────────────────────
@@ -70,101 +77,119 @@ def _now_iso() -> str:
 app = FastAPI(
     title="Oracle DB Provisioning Agent",
     description="Autonomous provisioning of Oracle databases inside a Docker-hosted Exadata environment.",
-    version="1.0.0",
+    version="2.0.0",
 )
+
+cors_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+allowed_origins = [o.strip() for o in cors_origins_raw.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # tighten in production
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Shared controller (singleton per process)
-_controller = DockerController()
+# Shared controller instance (defaulting to oracle-exadata-dev)
+_controller = DockerController(container_name="oracle-exadata-dev")
 
 
-# ─────────────────────────── request schema ──────────────────────────────────
+# ─────────────────────────── Request schema ──────────────────────────────────
 
 class ProvisionPayload(BaseModel):
-    db_name: str = Field(..., example="mydb1a")
-    db_unique_name: str = Field(..., example="mydb1a_site1")
+    db_name: str = Field(..., json_schema_extra={"example": "mydb1a"})
+    db_unique_name: str = Field(..., json_schema_extra={"example": "mydb1a_site1"})
+    target_cluster_id: str = Field(..., json_schema_extra={"example": "cluster-exa-dev01"})
     provisioning_type: Literal["seed", "clone"]
     character_set: str = Field(default="AL32UTF8")
     national_character_set: str = Field(default="AL16UTF16")
+    is_standby: bool = Field(default=False)
+    create_standby: bool = Field(default=False)
+    dataguard_enabled: bool = Field(default=False)
 
 
-# ─────────────────────────── helpers ─────────────────────────────────────────
+# ─────────────────────────── Helpers ─────────────────────────────────────────
 
-async def _run_provisioning(job: Job) -> None:
+async def _run_provisioning(job: JobRecord, container_name: str) -> None:
     """
-    Background coroutine that drives the full provisioning pipeline and
-    updates the shared job record in-place.
+    Background coroutine driving the full provisioning pipeline on a target container.
+    Persists log updates into JobStore.
     """
     job.status = "running"
     job.started_at = _now_iso()
+    job_store.update_job(job)
+
+    controller = DockerController(container_name=container_name)
 
     req = ProvisionRequest(
         db_name=job.db_name,
         db_unique_name=job.db_unique_name,
+        target_cluster_id=job.target_cluster_id,
         provisioning_type=job.provisioning_type,  # type: ignore[arg-type]
     )
 
     try:
         # ── Phase 1: provision (seed or clone) ───────────────────────────────
         if job.provisioning_type == "seed":
-            workflow = seed_database(req, _controller)
+            workflow = seed_database(req, controller)
         else:
-            workflow = clone_database(req, _controller)
+            workflow = clone_database(req, controller)
 
         async for line in workflow:
-            job.logs.append(line)
+            job_store.append_log(job.job_id, line)
 
         # ── Phase 2: post-provisioning parameters ────────────────────────────
-        async for line in apply_post_provision_parameters(job.db_name, _controller):
-            job.logs.append(line)
+        async for line in apply_post_provision_parameters(job.db_name, controller):
+            job_store.append_log(job.job_id, line)
 
         # ── Phase 3: verify parameters ───────────────────────────────────────
-        async for line in verify_parameters(job.db_name, _controller):
-            job.logs.append(line)
+        async for line in verify_parameters(job.db_name, controller):
+            job_store.append_log(job.job_id, line)
 
         # ── Phase 4: RMAN catalog check ──────────────────────────────────────
-        async for line in verify_rman_catalog_registration(job.db_name, _controller):
-            job.logs.append(line)
+        async for line in verify_rman_catalog_registration(job.db_name, controller):
+            job_store.append_log(job.job_id, line)
 
-        job.status = "completed"
-        job.logs.append(f"[AGENT] ✔  Job {job.job_id} completed successfully.")
+        current_job = job_store.get_job(job.job_id)
+        if current_job:
+            current_job.status = "completed"
+            job_store.append_log(job.job_id, f"[AGENT] ✔  Job {job.job_id} completed successfully.")
+            current_job.completed_at = _now_iso()
+            job_store.update_job(current_job)
 
     except DockerExecutionError as exc:
-        job.status = "failed"
-        job.error = str(exc)
-        job.logs.append(f"[AGENT] ✘  Docker error: {exc}")
+        current_job = job_store.get_job(job.job_id)
+        if current_job:
+            current_job.status = "failed"
+            current_job.error = str(exc)
+            job_store.append_log(job.job_id, f"[AGENT] ✘  Docker error: {exc}")
+            current_job.completed_at = _now_iso()
+            job_store.update_job(current_job)
     except Exception as exc:  # noqa: BLE001
-        job.status = "failed"
-        job.error = str(exc)
-        job.logs.append(f"[AGENT] ✘  Unexpected error: {exc}")
+        current_job = job_store.get_job(job.job_id)
+        if current_job:
+            current_job.status = "failed"
+            current_job.error = str(exc)
+            job_store.append_log(job.job_id, f"[AGENT] ✘  Unexpected error: {exc}")
+            current_job.completed_at = _now_iso()
+            job_store.update_job(current_job)
         logger.exception("Unhandled error in job %s", job.job_id)
-    finally:
-        job.completed_at = _now_iso()
 
 
-# ─────────────────────────── SSE generator ───────────────────────────────────
+# ─────────────────────────── SSE Generator ───────────────────────────────────
 
 async def _sse_stream(job_id: str) -> AsyncGenerator[str, None]:
-    """
-    Stream job logs as Server-Sent Events until the job finishes.
-    """
     sent_index = 0
 
     while True:
-        job = _jobs.get(job_id)
+        job = job_store.get_job(job_id)
         if job is None:
             yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
             return
 
-        # Send any new log lines
-        new_lines = job.logs[sent_index:]
+        logs = job.logs or []
+        new_lines = logs[sent_index:]
         for line in new_lines:
             payload = json.dumps({"type": "log", "message": line})
             yield f"data: {payload}\n\n"
@@ -178,11 +203,7 @@ async def _sse_stream(job_id: str) -> AsyncGenerator[str, None]:
         await asyncio.sleep(0.3)
 
 
-# Fix missing import annotation
-from collections.abc import AsyncGenerator  # noqa: E402
-
-
-# ─────────────────────────── routes ──────────────────────────────────────────
+# ─────────────────────────── Routes ──────────────────────────────────────────
 
 @app.get("/api/health", tags=["Infra"])
 async def health_check():
@@ -195,48 +216,72 @@ async def health_check():
     }
 
 
-@app.post("/api/provision", status_code=202, tags=["Provisioning"])
-async def provision(payload: ProvisionPayload, background_tasks=None):
-    """
-    Enqueue a new provisioning job.
+@app.get("/api/topology/frames", tags=["Topology"], dependencies=[Depends(verify_bearer_token)])
+async def list_topology_frames():
+    """List all Exadata frames from topology inventory."""
+    return [f.model_dump() for f in topology_manager.get_all_frames()]
 
-    Returns job_id immediately; use GET /api/jobs/{job_id}/stream for SSE.
+
+@app.get("/api/topology/frames/{frame_id}/cluster", tags=["Topology"], dependencies=[Depends(verify_bearer_token)])
+async def get_frame_cluster(frame_id: str):
+    """Get the cluster associated with a specific frame ID."""
+    cluster = topology_manager.get_cluster_for_frame(frame_id)
+    if not cluster:
+        raise HTTPException(status_code=404, detail=f"Cluster for frame '{frame_id}' not found.")
+    return cluster.model_dump()
+
+
+@app.post("/api/provision", status_code=202, tags=["Provisioning"], dependencies=[Depends(verify_bearer_token)])
+async def provision(payload: ProvisionPayload):
     """
+    Enqueue a new provisioning job against a target Exadata cluster.
+    """
+    # ── Resolve target_cluster_id FIRST ──
+    try:
+        container_name = topology_manager.resolve_cluster_container(payload.target_cluster_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"validation_errors": [str(exc)]})
+
     req = ProvisionRequest(
         db_name=payload.db_name,
         db_unique_name=payload.db_unique_name,
+        target_cluster_id=payload.target_cluster_id,
         provisioning_type=payload.provisioning_type,
         character_set=payload.character_set,
         national_character_set=payload.national_character_set,
+        is_standby=payload.is_standby,
+        create_standby=payload.create_standby,
+        dataguard_enabled=payload.dataguard_enabled,
     )
 
-    # ── Validate FIRST ──
+    # ── Validate Request Rules ──
     result = validate_provision_request(req)
     if not result.valid:
         raise HTTPException(status_code=400, detail={"validation_errors": result.errors})
 
     job_id = str(uuid.uuid4())
-    job = Job(
+    job = JobRecord(
         job_id=job_id,
         db_name=payload.db_name.upper(),
         db_unique_name=payload.db_unique_name.upper(),
+        target_cluster_id=payload.target_cluster_id,
         provisioning_type=payload.provisioning_type,
         status="pending",
         created_at=_now_iso(),
+        logs=[],
     )
-    _jobs[job_id] = job
+    job_store.create_job(job)
 
-    # Fire-and-forget in background
-    asyncio.create_task(_run_provisioning(job))
+    asyncio.create_task(_run_provisioning(job, container_name))
 
-    logger.info("Enqueued job %s (%s → %s)", job_id, payload.db_name, payload.provisioning_type)
+    logger.info("Enqueued job %s (%s → %s on %s)", job_id, payload.db_name, payload.provisioning_type, container_name)
     return {"job_id": job_id, "status": "pending"}
 
 
 @app.get("/api/jobs/{job_id}/stream", tags=["Provisioning"])
 async def stream_job(job_id: str):
     """Server-Sent Events stream for a specific job."""
-    if job_id not in _jobs:
+    if job_store.get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
     return StreamingResponse(
@@ -252,31 +297,31 @@ async def stream_job(job_id: str):
 @app.get("/api/jobs", tags=["Queue"])
 async def list_jobs():
     """Return all jobs grouped by status."""
-    jobs = list(_jobs.values())
+    jobs = [j.to_dict() for j in job_store.list_jobs()]
     return {
-        "pending": [j for j in jobs if j.status == "pending"],
-        "running": [j for j in jobs if j.status == "running"],
-        "completed": [j for j in jobs if j.status == "completed"],
-        "failed": [j for j in jobs if j.status == "failed"],
+        "pending": [j for j in jobs if j["status"] == "pending"],
+        "running": [j for j in jobs if j["status"] == "running"],
+        "completed": [j for j in jobs if j["status"] == "completed"],
+        "failed": [j for j in jobs if j["status"] == "failed"],
     }
 
 
 @app.get("/api/jobs/{job_id}", tags=["Queue"])
 async def get_job(job_id: str):
     """Return a single job's full detail including logs."""
-    job = _jobs.get(job_id)
+    job = job_store.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    return job.to_dict()
 
 
-@app.delete("/api/jobs/{job_id}", tags=["Queue"])
+@app.delete("/api/jobs/{job_id}", tags=["Queue"], dependencies=[Depends(verify_bearer_token)])
 async def delete_job(job_id: str):
     """Remove a completed or failed job from the queue."""
-    job = _jobs.get(job_id)
+    job = job_store.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status in ("pending", "running"):
         raise HTTPException(status_code=409, detail="Cannot delete an active job.")
-    del _jobs[job_id]
+    job_store.delete_job(job_id)
     return {"deleted": job_id}

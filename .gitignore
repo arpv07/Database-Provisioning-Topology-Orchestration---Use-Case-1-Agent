@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 venv/
 ENV/
+backend/jobs.db
 .pytest_cache/
 .coverage
 htmlcov/
