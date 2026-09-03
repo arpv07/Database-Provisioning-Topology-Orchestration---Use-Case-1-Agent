@@ -2,7 +2,7 @@
 Module 2: Docker Execution Controller
 ======================================
 Abstraction layer over the Python Docker SDK that:
-  • Connects to the local container  `oracle-exadata-dev`
+  • Connects to a target Docker container resolved from topology
   • Runs shell commands as the `oracle` OS user
   • Executes SQL*Plus commands as SYSDBA
   • Streams stdout/stderr output back as a generator for SSE or logging
@@ -21,7 +21,6 @@ from docker.models.containers import Container
 
 logger = logging.getLogger(__name__)
 
-CONTAINER_NAME = "oracle-exadata-dev"
 ORACLE_USER = "oracle"
 ORACLE_SID_ENV = "ORACLE_SID"
 
@@ -32,16 +31,17 @@ class DockerExecutionError(RuntimeError):
 
 class DockerController:
     """
-    Manages all container interactions for Oracle DB provisioning.
+    Manages container interactions for Oracle DB provisioning.
+    Requires an explicit container_name resolved per-request from topology.py.
 
     Usage
     -----
-    controller = DockerController()
+    controller = DockerController(container_name="oracle-exadata-dev")
     for line in controller.exec_shell("ls /u01/app/oracle/oradata"):
         print(line)
     """
 
-    def __init__(self, container_name: str = CONTAINER_NAME) -> None:
+    def __init__(self, container_name: str) -> None:
         self.container_name = container_name
         self._client: Optional[docker.DockerClient] = None
         self._container: Optional[Container] = None
@@ -139,11 +139,6 @@ class DockerController:
     ) -> Generator[str, None, None]:
         """
         Run *bash_command* inside the container as the `oracle` OS user.
-
-        Example
-        -------
-        for line in controller.exec_shell("rm -rf /u01/oradata/staging/*"):
-            print(line)
         """
         cmd = ["/bin/bash", "-c", bash_command]
         yield f"[SHELL] $ {bash_command}"
@@ -157,20 +152,10 @@ class DockerController:
     ) -> Generator[str, None, None]:
         """
         Pipe *sql_block* into SQL*Plus inside the container as SYSDBA.
-
-        The block is automatically terminated with EXIT so the process
-        always returns a deterministic exit code.
-
-        Example
-        -------
-        sql = "SELECT name FROM v\\$database;"
-        for line in controller.exec_sqlplus(sql, db_name="mydb1a"):
-            print(line)
         """
         sysdba_flag = " as sysdba" if as_sysdba else ""
         connect_str = f"/ {sysdba_flag}"
 
-        # Wrap the caller's block in a complete SQL*Plus session
         full_script = textwrap.dedent(f"""\
             WHENEVER SQLERROR EXIT SQL.SQLCODE;
             WHENEVER OSERROR  EXIT FAILURE;
@@ -179,7 +164,6 @@ class DockerController:
             EXIT;
         """)
 
-        # Escape single quotes inside the here-doc
         script_escaped = full_script.replace("'", "'\\''")
 
         bash_cmd = (

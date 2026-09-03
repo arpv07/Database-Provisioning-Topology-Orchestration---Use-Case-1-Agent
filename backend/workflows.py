@@ -36,15 +36,15 @@ STAGING_DIR = "/u01/oradata/staging"
 
 def get_db_passwords() -> dict[str, str]:
     """Retrieve passwords from env vars, failing fast if unset."""
-    fallback_pwd = os.getenv("ORACLE_PASSWORD", "Oracle_4U")
-    sys_pwd = os.getenv("DB_SYS_PASSWORD", fallback_pwd)
-    system_pwd = os.getenv("DB_SYSTEM_PASSWORD", fallback_pwd)
-    dbsnmp_pwd = os.getenv("DB_DBSNMP_PASSWORD", fallback_pwd)
+    fallback_pwd = os.getenv("ORACLE_PASSWORD")
+    sys_pwd = os.getenv("DB_SYS_PASSWORD") or fallback_pwd
+    system_pwd = os.getenv("DB_SYSTEM_PASSWORD") or fallback_pwd
+    dbsnmp_pwd = os.getenv("DB_DBSNMP_PASSWORD") or fallback_pwd
 
     if not (sys_pwd and system_pwd and dbsnmp_pwd):
         raise ValueError(
             "DB passwords must be set via DB_SYS_PASSWORD, DB_SYSTEM_PASSWORD, "
-            "and DB_DBSNMP_PASSWORD or ORACLE_PASSWORD."
+            "and DB_DBSNMP_PASSWORD or ORACLE_PASSWORD environment variables."
         )
     return {
         "sys": sys_pwd,

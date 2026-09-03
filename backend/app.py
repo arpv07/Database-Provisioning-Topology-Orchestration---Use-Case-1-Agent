@@ -55,7 +55,10 @@ def _now_iso() -> str:
 
 # ─────────────────────────── Security & Auth ─────────────────────────────────
 
-PROVISIONING_API_KEY = os.getenv("PROVISIONING_API_KEY", "dev-secret-key-123")
+PROVISIONING_API_KEY = os.getenv("PROVISIONING_API_KEY")
+if not PROVISIONING_API_KEY:
+    raise RuntimeError("PROVISIONING_API_KEY environment variable is required and must be set at startup.")
+
 security_bearer = HTTPBearer(auto_error=False)
 
 
@@ -91,7 +94,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Shared controller instance (defaulting to oracle-exadata-dev)
+# Controller instance resolved per-request based on topology
 _controller = DockerController(container_name="oracle-exadata-dev")
 
 
@@ -278,7 +281,7 @@ async def provision(payload: ProvisionPayload):
     return {"job_id": job_id, "status": "pending"}
 
 
-@app.get("/api/jobs/{job_id}/stream", tags=["Provisioning"])
+@app.get("/api/jobs/{job_id}/stream", tags=["Provisioning"], dependencies=[Depends(verify_bearer_token)])
 async def stream_job(job_id: str):
     """Server-Sent Events stream for a specific job."""
     if job_store.get_job(job_id) is None:
@@ -294,7 +297,7 @@ async def stream_job(job_id: str):
     )
 
 
-@app.get("/api/jobs", tags=["Queue"])
+@app.get("/api/jobs", tags=["Queue"], dependencies=[Depends(verify_bearer_token)])
 async def list_jobs():
     """Return all jobs grouped by status."""
     jobs = [j.to_dict() for j in job_store.list_jobs()]
@@ -306,7 +309,7 @@ async def list_jobs():
     }
 
 
-@app.get("/api/jobs/{job_id}", tags=["Queue"])
+@app.get("/api/jobs/{job_id}", tags=["Queue"], dependencies=[Depends(verify_bearer_token)])
 async def get_job(job_id: str):
     """Return a single job's full detail including logs."""
     job = job_store.get_job(job_id)

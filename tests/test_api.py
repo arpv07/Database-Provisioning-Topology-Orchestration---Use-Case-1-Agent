@@ -126,7 +126,7 @@ class TestJobQueue:
             )
 
     def test_list_jobs_empty(self):
-        r = client.get("/api/jobs")
+        r = client.get("/api/jobs", headers=AUTH_HEADERS)
         assert r.status_code == 200
 
     def test_job_appears_in_queue(self):
@@ -134,7 +134,7 @@ class TestJobQueue:
         assert r.status_code == 202
         job_id = r.json()["job_id"]
 
-        r2 = client.get("/api/jobs")
+        r2 = client.get("/api/jobs", headers=AUTH_HEADERS)
         all_jobs = (
             r2.json()["pending"]
             + r2.json()["running"]
@@ -147,10 +147,10 @@ class TestJobQueue:
     def test_get_single_job(self):
         r = self._submit()
         job_id = r.json()["job_id"]
-        r2 = client.get(f"/api/jobs/{job_id}")
+        r2 = client.get(f"/api/jobs/{job_id}", headers=AUTH_HEADERS)
         assert r2.status_code == 200
         assert r2.json()["job_id"] == job_id
 
     def test_get_missing_job_404(self):
-        r = client.get("/api/jobs/does-not-exist")
+        r = client.get("/api/jobs/does-not-exist", headers=AUTH_HEADERS)
         assert r.status_code == 404
