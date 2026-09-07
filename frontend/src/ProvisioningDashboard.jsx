@@ -116,7 +116,6 @@ export default function ProvisioningDashboard() {
   const [rcaData, setRcaData]         = useState(null);
   const [rcaLoading, setRcaLoading]   = useState(false);
   const [activeNode, setActiveNode]   = useState(1);
-  const [useLangGraph, setUseLangGraph] = useState(true);
 
   // Form State
   const [form, setForm] = useState({
@@ -256,10 +255,8 @@ export default function ProvisioningDashboard() {
     setLoading(true);
     setActiveNode(1);
 
-    const endpoint = useLangGraph ? `${API_BASE}/api/ai/langgraph-provision` : `${API_BASE}/api/provision`;
-
     try {
-      const r = await fetch(endpoint, {
+      const r = await fetch(`${API_BASE}/api/ai/langgraph-provision`, {
         method: 'POST',
         headers: authHeaders,
         body: JSON.stringify(form),
@@ -271,14 +268,9 @@ export default function ProvisioningDashboard() {
       }
 
       const body = await r.json();
-      if (useLangGraph) {
-        setStreamLogs(body.logs || []);
-        setActiveNode(body.status === 'completed' ? 3 : 4);
-        if (body.rca_report) setRcaData(body.rca_report);
-      } else {
-        setSelectedJob({ job_id: body.job_id, ...form });
-        startStream(body.job_id);
-      }
+      setStreamLogs(body.logs || []);
+      setActiveNode(body.status === 'completed' ? 3 : 4);
+      if (body.rca_report) setRcaData(body.rca_report);
     } catch (err) {
       setActiveNode(4);
     } finally {
@@ -312,13 +304,6 @@ export default function ProvisioningDashboard() {
 
         {/* Header Actions */}
         <div className="flex items-center gap-3">
-          <button
-            onClick={() => setUseLangGraph(!useLangGraph)}
-            className={`px-3 py-1.5 rounded-xl border text-xs font-mono transition-all ${useLangGraph ? 'bg-indigo-50 border-indigo-300 text-indigo-700 font-medium' : 'bg-white border-slate-200 text-slate-600'}`}
-          >
-            Engine: {useLangGraph ? '⚡ LangGraph StateGraph' : '⚙ Standard Engine'}
-          </button>
-
           <button
             onClick={() => setShowHealthModal(true)}
             className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 transition-all text-xs font-mono"
