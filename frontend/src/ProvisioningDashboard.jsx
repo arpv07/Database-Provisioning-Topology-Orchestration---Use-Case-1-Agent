@@ -358,7 +358,6 @@ export default function ProvisioningDashboard() {
           
           <div className="flex items-center justify-between border-b border-slate-100 pb-3">
             <h2 className="text-xs font-bold uppercase tracking-wider text-slate-700">Container Configuration</h2>
-            <span className="text-[10px] font-mono text-slate-400">Oracle 19c Free Edition</span>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
