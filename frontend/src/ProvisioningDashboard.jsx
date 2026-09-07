@@ -295,14 +295,14 @@ export default function ProvisioningDashboard() {
       <header className="border-b border-white/[0.08] px-8 py-4 flex items-center justify-between bg-[#080b12]/80 backdrop-blur-2xl sticky top-0 z-40">
         <div className="flex items-center gap-4">
           <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-violet-600 via-indigo-600 to-purple-600 p-[1px] shadow-[0_0_25px_rgba(139,92,246,0.3)]">
-            <div className="w-full h-full rounded-2xl bg-[#06080d] flex items-center justify-center text-sm font-black text-purple-300">
-              FG
+            <div className="w-full h-full rounded-2xl bg-[#06080d] flex items-center justify-center text-[10px] font-black text-purple-300">
+              ORA
             </div>
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-base font-extrabold tracking-tight bg-gradient-to-r from-white via-gray-200 to-purple-300 bg-clip-text text-transparent">
-                Forge Provisioning Agent
+                Oracle DB Provisioning Agent
               </h1>
               <span className="px-2.5 py-0.5 rounded-full bg-violet-500/10 text-violet-300 text-[10px] font-mono border border-violet-500/20">
                 LangGraph StateGraph
@@ -331,7 +331,7 @@ export default function ProvisioningDashboard() {
         </div>
       </header>
 
-      {/* Forge Command Bar */}
+      {/* Command Bar */}
       <section className="px-8 pt-6 pb-2">
         <div className="rounded-3xl bg-gradient-to-r from-violet-950/30 via-indigo-950/20 to-purple-950/30 border border-violet-500/30 p-4 shadow-[0_0_40px_rgba(139,92,246,0.12)] flex items-center gap-3">
           <span className="text-lg">✨</span>
@@ -339,7 +339,7 @@ export default function ProvisioningDashboard() {
             type="text"
             value={aiPrompt}
             onChange={(e) => setAiPrompt(e.target.value)}
-            placeholder="Type Forge AI intent, e.g. Clone production DB ORD1P to dev cluster for QA benchmarking..."
+            placeholder="Type AI intent, e.g. Clone production DB ORD1P to dev cluster for QA benchmarking..."
             className="flex-1 bg-transparent text-xs text-white placeholder-gray-500 focus:outline-none font-mono"
           />
           <button
@@ -453,7 +453,7 @@ export default function ProvisioningDashboard() {
               disabled={loading}
               className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-violet-600 via-indigo-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 text-white font-extrabold text-xs tracking-wider uppercase shadow-[0_0_30px_rgba(139,92,246,0.3)] transition-all"
             >
-              {loading ? 'Executing Workflow…' : 'Launch Forge Pipeline'}
+              {loading ? 'Executing Workflow…' : 'Launch Provisioning Pipeline'}
             </button>
           </form>
         </aside>
