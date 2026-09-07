@@ -14,7 +14,7 @@ const CLUSTERS = [
   { id: 'cluster-exa-stg01',  label: 'cluster-exa-stg01 · Frame X8 (Staging)' },
 ];
 
-// ─────────────────────────── Forge Health Modal ─────────────────────────────
+// ─────────────────────────── Health Modal ─────────────────────────────
 function HealthModal({ isOpen, onClose, healthy }) {
   if (!isOpen) return null;
   return (
@@ -23,7 +23,7 @@ function HealthModal({ isOpen, onClose, healthy }) {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <span className={`w-3.5 h-3.5 rounded-full ${healthy ? 'bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]' : 'bg-amber-400 animate-ping'}`} />
-            <h3 className="text-sm font-bold text-white tracking-wide">Forge Container Diagnostic</h3>
+            <h3 className="text-sm font-bold text-white tracking-wide">Docker Environment Diagnostic</h3>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-white text-xs">✕</button>
         </div>
@@ -52,7 +52,7 @@ function HealthModal({ isOpen, onClose, healthy }) {
   );
 }
 
-// ─────────────────────────── Forge RCA Modal ────────────────────────────────
+// ─────────────────────────── RCA Modal ────────────────────────────────
 function RcaModal({ isOpen, onClose, rcaData, loading }) {
   if (!isOpen) return null;
   return (
@@ -100,7 +100,8 @@ function RcaModal({ isOpen, onClose, rcaData, loading }) {
   );
 }
 
-// ─────────────────────────── Forge Dashboard Component ──────────────────────
+// ─────────────────────────── Dashboard Component ──────────────────────
+
 export default function ProvisioningDashboard() {
   const [jobs, setJobs]               = useState([]);
   const [selectedJob, setSelectedJob] = useState(null);
