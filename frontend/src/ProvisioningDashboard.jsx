@@ -252,6 +252,10 @@ export default function ProvisioningDashboard() {
   // Submit
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (healthy === false) {
+      setStreamLogs(['[ERROR] ✘ Cannot submit: Target Docker container is offline. Please run "docker compose up -d".']);
+      return;
+    }
     setLoading(true);
     setActiveNode(1);
 
@@ -263,6 +267,9 @@ export default function ProvisioningDashboard() {
       });
 
       if (!r.ok) {
+        const body = await r.json();
+        const msg = body.detail?.validation_errors?.[0] || body.detail || 'Docker container offline or unreachable.';
+        setStreamLogs([`[ERROR] ✘ ${msg}`]);
         setActiveNode(4);
         return;
       }
@@ -272,6 +279,7 @@ export default function ProvisioningDashboard() {
       setActiveNode(body.status === 'completed' ? 3 : 4);
       if (body.rca_report) setRcaData(body.rca_report);
     } catch (err) {
+      setStreamLogs(['[ERROR] ✘ Network error connecting to backend API or Docker container.']);
       setActiveNode(4);
     } finally {
       setLoading(false);
@@ -347,6 +355,18 @@ export default function ProvisioningDashboard() {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             
+            {/* Docker Offline Red Warning Banner */}
+            {healthy === false && (
+              <div className="rounded-xl bg-red-50 border border-red-200 p-3 text-xs text-red-700 space-y-1">
+                <p className="font-bold flex items-center gap-1.5">
+                  <span>⚠️</span> Docker Container Offline
+                </p>
+                <p className="text-[11px] text-red-600 leading-relaxed">
+                  Target container <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-800">oracle-exadata-dev</code> is unreachable. Please run <code className="font-mono bg-red-100 px-1 py-0.5 rounded text-red-800">docker compose up -d</code> in your terminal before provisioning.
+                </p>
+              </div>
+            )}
+
             {/* Target Cluster Container */}
             <div className="space-y-1">
               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-600">Target Container Cluster</label>
@@ -432,10 +452,10 @@ export default function ProvisioningDashboard() {
             {/* Submit */}
             <button
               type="submit"
-              disabled={loading}
-              className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs tracking-wide transition-all shadow-sm"
+              disabled={loading || healthy === false}
+              className={`w-full py-3 rounded-xl font-bold text-xs tracking-wide transition-all shadow-sm ${healthy === false ? 'bg-slate-300 text-slate-500 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 text-white'}`}
             >
-              {loading ? 'Executing Workflow…' : 'Launch Provisioning Pipeline'}
+              {loading ? 'Executing Workflow…' : healthy === false ? 'Docker Container Offline' : 'Launch Provisioning Pipeline'}
             </button>
           </form>
         </aside>

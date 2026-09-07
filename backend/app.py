@@ -270,6 +270,19 @@ async def ai_diagnose_log(payload: AIDiagnosePayload):
 @app.post("/api/ai/langgraph-provision", tags=["AI Agent"], dependencies=[Depends(verify_bearer_token)])
 async def ai_langgraph_provision(payload: ProvisionPayload):
     """Execute provisioning request through the compiled LangGraph StateGraph workflow engine."""
+    container_name = topology_manager.resolve_cluster_container(payload.target_cluster_id)
+    controller = DockerController(container_name=container_name)
+    if not controller.health_check():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "validation_errors": [
+                    f"Target Docker container '{container_name}' is offline or unreachable. "
+                    "Please start Docker Desktop and run 'docker compose up -d' before submitting provision requests."
+                ]
+            },
+        )
+
     job_id = str(uuid.uuid4())
     initial_state = {
         "job_id": job_id,
@@ -300,6 +313,18 @@ async def provision(payload: ProvisionPayload):
         container_name = topology_manager.resolve_cluster_container(payload.target_cluster_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"validation_errors": [str(exc)]})
+
+    controller = DockerController(container_name=container_name)
+    if not controller.health_check():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "validation_errors": [
+                    f"Target Docker container '{container_name}' is offline or unreachable. "
+                    "Please start Docker Desktop and run 'docker compose up -d' before submitting provision requests."
+                ]
+            },
+        )
 
     # ── Validate clone source if provisioning_type is clone ──
     if payload.provisioning_type == "clone":
