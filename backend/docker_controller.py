@@ -115,10 +115,10 @@ class DockerController:
             if exit_code != 0:
                 raise DockerExecutionError(f"Command exited with code {exit_code}")
 
-        except (DockerExecutionError, Exception) as exc:
-            logger.warning("Docker execution unavailable (%s). Running in simulation mode.", exc)
-            yield f"[SIMULATION] Container '{self.container_name}' executing command: {' '.join(command[:3])}…"
-            yield f"[SIMULATION] Process completed successfully (exit_code=0)."
+        except Exception as exc:
+            logger.error("Docker execution failed (%s). Raising DockerExecutionError.", exc)
+            yield f"[ERROR] Docker execution failed: {exc}"
+            raise DockerExecutionError(f"Docker execution failed: {exc}") from exc
 
     # ──────────────────────────── public API ─────────────────────────────────
 
