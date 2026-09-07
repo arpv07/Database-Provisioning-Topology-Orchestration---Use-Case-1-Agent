@@ -22,12 +22,16 @@ from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
+import dotenv
+dotenv.load_dotenv()
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+from .ai_agent import diagnose_provisioning_error, parse_natural_language_intent
 from .docker_controller import DockerController, DockerExecutionError
 from .job_store import JobRecord, job_store
 from .topology import topology_manager
@@ -236,10 +240,30 @@ async def get_frame_cluster(frame_id: str):
     return cluster.model_dump()
 
 
+class AIPromptPayload(BaseModel):
+    prompt: str = Field(..., json_schema_extra={"example": "Clone production database ORD1P to cluster-exa-dev01 for testing"})
+
+
+class AIDiagnosePayload(BaseModel):
+    logs: list[str] = Field(default_factory=list)
+
+
 @app.get("/api/topology/clone-sources", tags=["Topology"], dependencies=[Depends(verify_bearer_token)])
 async def list_clone_sources():
     """List all registered clone source databases across clusters."""
     return [cs.model_dump() for cs in topology_manager.get_all_clone_sources()]
+
+
+@app.post("/api/ai/parse-intent", tags=["AI Agent"], dependencies=[Depends(verify_bearer_token)])
+async def ai_parse_intent(payload: AIPromptPayload):
+    """Parse natural language request into structured ProvisionPayload using Llama-3.3-70b (Groq API)."""
+    return parse_natural_language_intent(payload.prompt)
+
+
+@app.post("/api/ai/diagnose", tags=["AI Agent"], dependencies=[Depends(verify_bearer_token)])
+async def ai_diagnose_log(payload: AIDiagnosePayload):
+    """Generate Root Cause Analysis (RCA) and resolution recommendations for execution log errors."""
+    return diagnose_provisioning_error(payload.logs)
 
 
 @app.post("/api/provision", status_code=202, tags=["Provisioning"], dependencies=[Depends(verify_bearer_token)])
