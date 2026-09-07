@@ -20,12 +20,9 @@ AUTH_HEADERS = {"Authorization": "Bearer dev-secret-key-123"}
 @pytest.fixture(autouse=True)
 def clear_job_store_and_mock_controller():
     """Isolate each test and mock the Docker controller to avoid Docker SDK network calls."""
-    with patch("backend.app._controller") as mock_ctrl:
-        mock_ctrl.health_check.return_value = True
-        mock_ctrl.exec_shell.return_value = iter(["Mock shell output line 1", "Mock shell output line 2"])
-        mock_ctrl.exec_sqlplus.return_value = iter(["Mock SQL output line 1", "PASS"])
-        mock_ctrl.exec_rman.return_value = iter(["Mock RMAN output line 1"])
-        yield mock_ctrl
+    with patch("backend.app.DockerController.health_check", return_value=True), \
+         patch("backend.docker_controller.DockerController.health_check", return_value=True):
+        yield
 
 
 client = TestClient(app)
