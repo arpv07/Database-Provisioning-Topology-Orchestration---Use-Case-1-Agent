@@ -1,8 +1,8 @@
 """
-Module: Job Store (Persistence)
-================────────────────
-Abstract interface and SQLite implementation for persisting provisioning jobs
-and execution log streams across server restarts.
+Module 5: Persistence Boundary (JobStore)
+===========================================
+Defines the JobRecord data structure and JobStore interface.
+Provides SQLiteJobStore for persistence across application restarts.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ class JobRecord:
     provisioning_type: str
     status: str
     created_at: str
+    source_cluster_id: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     logs: Optional[List[str]] = None
@@ -80,6 +81,7 @@ class SQLiteJobStore(BaseJobStore):
                     db_name TEXT NOT NULL,
                     db_unique_name TEXT NOT NULL,
                     target_cluster_id TEXT NOT NULL,
+                    source_cluster_id TEXT,
                     provisioning_type TEXT NOT NULL,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -89,6 +91,10 @@ class SQLiteJobStore(BaseJobStore):
                     error TEXT
                 )
             """)
+            try:
+                conn.execute("ALTER TABLE jobs ADD COLUMN source_cluster_id TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already exists
             conn.commit()
 
     def create_job(self, job: JobRecord) -> None:
@@ -96,16 +102,17 @@ class SQLiteJobStore(BaseJobStore):
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO jobs (job_id, db_name, db_unique_name, target_cluster_id,
+                INSERT INTO jobs (job_id, db_name, db_unique_name, target_cluster_id, source_cluster_id,
                                   provisioning_type, status, created_at, started_at,
                                   completed_at, logs, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.job_id,
                     job.db_name,
                     job.db_unique_name,
                     job.target_cluster_id,
+                    job.source_cluster_id,
                     job.provisioning_type,
                     job.status,
                     job.created_at,
@@ -145,44 +152,34 @@ class SQLiteJobStore(BaseJobStore):
         job.logs.append(log_line)
         self.update_job(job)
 
+    def _row_to_record(self, row: sqlite3.Row) -> JobRecord:
+        keys = row.keys()
+        return JobRecord(
+            job_id=row["job_id"],
+            db_name=row["db_name"],
+            db_unique_name=row["db_unique_name"],
+            target_cluster_id=row["target_cluster_id"],
+            source_cluster_id=row["source_cluster_id"] if "source_cluster_id" in keys else None,
+            provisioning_type=row["provisioning_type"],
+            status=row["status"],
+            created_at=row["created_at"],
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+            logs=json.loads(row["logs"]),
+            error=row["error"],
+        )
+
     def get_job(self, job_id: str) -> Optional[JobRecord]:
         with self._get_connection() as conn:
             row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
             if not row:
                 return None
-            return JobRecord(
-                job_id=row["job_id"],
-                db_name=row["db_name"],
-                db_unique_name=row["db_unique_name"],
-                target_cluster_id=row["target_cluster_id"],
-                provisioning_type=row["provisioning_type"],
-                status=row["status"],
-                created_at=row["created_at"],
-                started_at=row["started_at"],
-                completed_at=row["completed_at"],
-                logs=json.loads(row["logs"]),
-                error=row["error"],
-            )
+            return self._row_to_record(row)
 
     def list_jobs(self) -> List[JobRecord]:
         with self._get_connection() as conn:
             rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
-            return [
-                JobRecord(
-                    job_id=row["job_id"],
-                    db_name=row["db_name"],
-                    db_unique_name=row["db_unique_name"],
-                    target_cluster_id=row["target_cluster_id"],
-                    provisioning_type=row["provisioning_type"],
-                    status=row["status"],
-                    created_at=row["created_at"],
-                    started_at=row["started_at"],
-                    completed_at=row["completed_at"],
-                    logs=json.loads(row["logs"]),
-                    error=row["error"],
-                )
-                for row in rows
-            ]
+            return [self._row_to_record(row) for row in rows]
 
     def delete_job(self, job_id: str) -> None:
         with self._get_connection() as conn:
@@ -190,5 +187,5 @@ class SQLiteJobStore(BaseJobStore):
             conn.commit()
 
 
-# Default singleton instance
+# Global singleton instance
 job_store = SQLiteJobStore()

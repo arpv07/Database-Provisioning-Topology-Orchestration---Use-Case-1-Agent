@@ -130,6 +130,7 @@ async def _run_provisioning(job: JobRecord, container_name: str) -> None:
         db_name=job.db_name,
         db_unique_name=job.db_unique_name,
         target_cluster_id=job.target_cluster_id,
+        source_cluster_id=job.source_cluster_id,
         provisioning_type=job.provisioning_type,  # type: ignore[arg-type]
     )
 
@@ -284,6 +285,7 @@ async def provision(payload: ProvisionPayload):
         db_name=payload.db_name.upper(),
         db_unique_name=payload.db_unique_name.upper(),
         target_cluster_id=payload.target_cluster_id,
+        source_cluster_id=payload.source_cluster_id,
         provisioning_type=payload.provisioning_type,
         status="pending",
         created_at=_now_iso(),
