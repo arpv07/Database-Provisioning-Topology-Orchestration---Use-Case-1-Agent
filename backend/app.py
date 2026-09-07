@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from .ai_agent import diagnose_provisioning_error, parse_natural_language_intent
 from .docker_controller import DockerController, DockerExecutionError
 from .job_store import JobRecord, job_store
+from .langgraph_workflow import langgraph_app
 from .topology import topology_manager
 from .validation_engine import ProvisionRequest, validate_provision_request
 from .workflows import (
@@ -264,6 +265,29 @@ async def ai_parse_intent(payload: AIPromptPayload):
 async def ai_diagnose_log(payload: AIDiagnosePayload):
     """Generate Root Cause Analysis (RCA) and resolution recommendations for execution log errors."""
     return diagnose_provisioning_error(payload.logs)
+
+
+@app.post("/api/ai/langgraph-provision", tags=["AI Agent"], dependencies=[Depends(verify_bearer_token)])
+async def ai_langgraph_provision(payload: ProvisionPayload):
+    """Execute provisioning request through the compiled LangGraph StateGraph workflow engine."""
+    job_id = str(uuid.uuid4())
+    initial_state = {
+        "job_id": job_id,
+        "raw_prompt": None,
+        "request": payload.model_dump(),
+        "status": "pending",
+        "logs": [f"[LANGGRAPH] ▶ Initiating LangGraph StateGraph Workflow (Job ID: {job_id[:8]})"],
+        "rca_report": None,
+        "error": None,
+    }
+    final_state = langgraph_app.invoke(initial_state)
+    return {
+        "job_id": job_id,
+        "status": final_state.get("status"),
+        "logs": final_state.get("logs", []),
+        "rca_report": final_state.get("rca_report"),
+        "error": final_state.get("error"),
+    }
 
 
 @app.post("/api/provision", status_code=202, tags=["Provisioning"], dependencies=[Depends(verify_bearer_token)])
