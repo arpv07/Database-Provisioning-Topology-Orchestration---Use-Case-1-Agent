@@ -179,6 +179,34 @@ async def list_clone_sources():
     return [cs.model_dump() for cs in topology_manager.get_all_clone_sources()]
 
 
+def run_provision_job_safe(job_id: str, initial_state: dict) -> None:
+    """Wrapper that runs langgraph_app.invoke and guarantees exception handling and job_store cleanup."""
+    job = job_store.get_job(job_id)
+    if job:
+        job.status = "running"
+        job.started_at = _now_iso()
+        job_store.update_job(job)
+
+    try:
+        final_state = langgraph_app.invoke(initial_state)
+        job = job_store.get_job(job_id)
+        if job:
+            job.status = final_state.get("status", "completed")
+            job.logs = final_state.get("logs", job.logs)
+            job.error = final_state.get("error")
+            job.completed_at = _now_iso()
+            job_store.update_job(job)
+    except Exception as exc:
+        logger.error("Background provision job %s failed with unhandled exception: %s", job_id, exc, exc_info=True)
+        job = job_store.get_job(job_id)
+        if job:
+            job.status = "failed"
+            job.error = str(exc)
+            job.completed_at = _now_iso()
+            job.logs = (job.logs or []) + [f"[ERROR] Job failed with unhandled exception: {exc}"]
+            job_store.update_job(job)
+
+
 @app.post("/api/ai/parse-intent", tags=["AI Agent"], dependencies=[Depends(verify_bearer_token)])
 async def ai_parse_intent(payload: AIPromptPayload):
     """Parse natural language request into structured ProvisionPayload using Llama-3.3-70b (Groq API)."""
@@ -230,7 +258,7 @@ async def ai_langgraph_provision(payload: ProvisionPayload):
         "rca_report": None,
         "error": None,
     }
-    asyncio.create_task(asyncio.to_thread(langgraph_app.invoke, initial_state))
+    asyncio.create_task(asyncio.to_thread(run_provision_job_safe, job_id, initial_state))
     return {
         "job_id": job_id,
         "status": "pending",
@@ -304,7 +332,7 @@ async def provision(payload: ProvisionPayload):
     }
 
     logger.info("Starting job %s (%s → %s on %s)", job_id, payload.db_name, payload.provisioning_type, container_name)
-    asyncio.create_task(asyncio.to_thread(langgraph_app.invoke, initial_state))
+    asyncio.create_task(asyncio.to_thread(run_provision_job_safe, job_id, initial_state))
 
     return {
         "job_id": job_id,

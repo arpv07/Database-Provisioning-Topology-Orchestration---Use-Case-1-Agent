@@ -67,14 +67,14 @@ frames:
         - "STG1S"
 
 clone_sources:
-  - db_name: "ORD1P"
-    db_unique_name: "ORD1P_SITE1"
+  - db_name: "FREE"
+    db_unique_name: "FREE"
     source_cluster_id: "cluster-exa-prod01"
     container_name: "oracle-source"
     environment: "Production"
 
-  - db_name: "DEV1D"
-    db_unique_name: "DEV1D_SITE1"
+  - db_name: "FREE"
+    db_unique_name: "FREE"
     source_cluster_id: "cluster-exa-dev01"
     container_name: "oracle-exadata-dev"
     environment: "Development"

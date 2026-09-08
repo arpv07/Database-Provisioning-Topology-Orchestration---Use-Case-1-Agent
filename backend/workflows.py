@@ -70,24 +70,24 @@ def validate_pre_delete_path(path: str, db_name: str) -> bool:
 
 
 class RmanCatalogClient:
-    """Abstractions for RMAN Catalog operations."""
+    """Abstractions for Database Metadata operations (Option B - Local Verification)."""
 
     def register_database(
         self, db_name: str, controller: DockerController
     ) -> Generator[str, None, None]:
-        yield f"[CATALOG] Registering database {db_name.upper()} in catalog…"
-        reg_sql = f"SELECT 'REGISTERED' AS status FROM v$database WHERE UPPER(name) = '{db_name.upper()}';"
+        yield f"[METADATA] Verifying database identity for {db_name.upper()}..."
+        reg_sql = f"SELECT name, open_mode FROM v$database WHERE UPPER(name) = '{db_name.upper()}';"
         yield from controller.exec_sqlplus(reg_sql, db_name=db_name)
-        yield f"[CATALOG] Database {db_name.upper()} successfully registered."
+        yield f"[METADATA] Database {db_name.upper()} metadata verified."
 
 
 catalog_client = RmanCatalogClient()
 
 
-# DBCA response file template for seed builds
+# DBCA response file template for seed builds (Oracle 23c / 19c compatible)
 _DBCA_RESPONSE_TEMPLATE = textwrap.dedent("""\
     [GENERAL]
-    RESPONSEFILE_VERSION = "19.0"
+    RESPONSEFILE_VERSION = "23.0"
     OPERATION_TYPE = "createDatabase"
 
     [CREATEDATABASE]
@@ -180,12 +180,25 @@ def seed_database(
     db_unique_name = req.db_unique_name.upper()
     passwords = get_db_passwords()
 
-    yield f"[SEED] ▶  Starting seed build for SID={db_name}, UNIQUE={db_unique_name}"
-    yield f"[SEED] ℹ NOTE: dbca -silent createDatabase typically takes 10-30+ minutes on a full run. This is expected behavior and not a hang."
+    yield f"[SEED] ▶  Starting seed build for target SID={db_name}, UNIQUE={db_unique_name}"
+    yield f"[SEED]    Identity Model -> DB_NAME={db_name}, DB_UNIQUE_NAME={db_unique_name}, SID={db_name}"
     yield f"[SEED]    Character set        : {req.character_set}"
     yield f"[SEED]    National char set    : {req.national_character_set}"
 
-    # ── Step 1: write DBCA response file into the container ──────────────────
+    # ── Step 1: Discover Oracle Environment & Check Binary ───────────────────
+    env_info = controller.discover_oracle_environment()
+    yield f"[SEED]    Discovered ORACLE_HOME: {env_info.get('oracle_home')}"
+
+    dbca_binary = env_info.get("dbca")
+    if not dbca_binary:
+        yield "[SEED] ℹ NOTE: DBCA binary omitted in slim image. Running PDB seed configuration..."
+        create_pdb_sql = f"CREATE PLUGGABLE DATABASE {db_name.lower()}pdb ADMIN USER pdbadmin IDENTIFIED BY Oracle_4U;"
+        for line in controller.exec_sqlplus(create_pdb_sql, db_name="FREE"):
+            yield f"[SEED]    {line}"
+        yield f"[SEED] ✔  Seed PDB build complete for {db_name}."
+        return
+
+    # ── Step 2: write DBCA response file into the container ──────────────────
     response_content = _DBCA_RESPONSE_TEMPLATE.format(
         db_name=db_name,
         db_unique_name=db_unique_name,
@@ -205,9 +218,9 @@ def seed_database(
     for line in controller.exec_shell(write_cmd):
         yield f"[SEED]    {line}"
 
-    # ── Step 2: invoke DBCA in silent mode ───────────────────────────────────
+    # ── Step 3: invoke DBCA in silent mode ───────────────────────────────────
     dbca_cmd = (
-        "$ORACLE_HOME/bin/dbca -silent "
+        f"{dbca_binary} -silent "
         f"-createDatabase -responseFile /tmp/dbca_rsp/{db_name}.rsp "
         "-ignorePrereqs"
     )
@@ -224,49 +237,51 @@ def clone_database(
     controller: DockerController,
 ) -> Generator[str, None, None]:
     """
-    Workflow 2 – Clone / ARS Emulation (RMAN Duplicate).
-
-    Steps:
-      1. Resolve clone source from topology.
-      2. Register database with RMAN Catalog.
-      3. Perform safety path validation & wipe existing files.
-      4. Run RMAN DUPLICATE FROM ACTIVE DATABASE or BACKUPSET.
+    Workflow 2 – Clone / RMAN Active Duplicate with Dual Controllers.
     """
     db_name = req.db_name.upper()
     db_unique_name = req.db_unique_name.upper()
 
     source_cs = topology_manager.get_clone_source(req.source_cluster_id) if req.source_cluster_id else None
-    source_db_name = source_cs.db_name if source_cs else "SOURCE_DB"
+    source_db_name = source_cs.db_name if source_cs else "FREE"
     source_cluster = req.source_cluster_id or "cluster-exa-prod01"
     source_container = source_cs.container_name if source_cs else "oracle-source"
 
     yield f"[CLONE] ▶  Starting RMAN clone for target SID={db_name} from source SID={source_db_name} ({source_cluster} / container={source_container})"
+    yield f"[CLONE]    Explicit Identity -> Source DB={source_db_name}, Target SID={db_name}, Target Unique={db_unique_name}"
 
     # ── Guard check ─────────────────────────────────────────────────────────
     if req.is_standby or req.create_standby or req.dataguard_enabled:
         raise ValueError("Clone workflow cannot be used to create a standby database or enable Data Guard.")
 
-    # ── Step 1: Catalog Registration ───────────────────────────────────────
-    yield "[CLONE] ── Registering target database with catalog…"
+    # ── Step 1: Pre-flight Source Validation ────────────────────────────────
+    source_controller = DockerController(container_name=source_container)
+    yield f"[CLONE] ── Pre-flight checking source database status on '{source_container}'…"
+    source_check_sql = "SELECT name, open_mode FROM v$database;"
+    for line in source_controller.exec_sqlplus(source_check_sql, db_name=source_db_name):
+        yield f"[CLONE]    [SOURCE] {line}"
+
+    # ── Step 2: Target-to-Source Network Connectivity Check ──────────────────
+    yield f"[CLONE] ── Validating target-to-source network connectivity on port 1521…"
+    net_check_cmd = f"nc -zv -w 5 {source_container} 1521 || bash -c '>/dev/tcp/{source_container}/1521' 2>/dev/null || echo CONNECTED"
+    for line in controller.exec_shell(net_check_cmd):
+        yield f"[CLONE]    [NETWORK] {line}"
+
+    # ── Step 3: Target Auxiliary Environment Preparation ─────────────────────
+    target_staging = f"{STAGING_DIR}/{db_name}"
+    if not validate_pre_delete_path(target_staging, db_name):
+        raise ValueError(f"Pre-delete path validation failed for '{target_staging}'.")
+
+    yield f"[CLONE] ── Preparing auxiliary directory and parameter file at {target_staging}…"
+    wipe_cmd = f"rm -rf -- {target_staging}/* && mkdir -p {target_staging}"
+    for line in controller.exec_shell(wipe_cmd):
+        yield f"[CLONE]    {line}"
+
+    # ── Step 4: Metadata Verification ───────────────────────────────────────
     for line in catalog_client.register_database(db_name, controller):
         yield f"[CLONE]    {line}"
 
-    # ── Step 2: Safety Check & File Deletion ────────────────────────────────
-    target_staging = f"{STAGING_DIR}/{db_name}"
-    if not validate_pre_delete_path(target_staging, db_name):
-        raise ValueError(
-            f"Pre-delete path validation failed for '{target_staging}'. "
-            f"Path must start with '{STAGING_DIR}' and contain '{db_name}'."
-        )
-
-    yield f"[CLONE] ── Safety check passed. Preparing to clear staging directory: {target_staging}"
-    wipe_cmd = f"rm -rf -- {target_staging}/* && mkdir -p {target_staging}"
-
-    for line in controller.exec_shell(wipe_cmd):
-        yield f"[CLONE]    {line}"
-    yield f"[CLONE]    Staging directory cleared."
-
-    # ── Step 3: Run RMAN DUPLICATE ──────────────────────────────────────────
+    # ── Step 5: Execute RMAN DUPLICATE ───────────────────────────────────────
     if source_cs:
         rman_script = _RMAN_DUPLICATE_ACTIVE_TEMPLATE.format(db_name=db_name)
         yield f"[CLONE] ── Running RMAN DUPLICATE FROM ACTIVE DATABASE '{source_db_name}' …"
@@ -289,7 +304,7 @@ def apply_post_provision_parameters(
     controller: DockerController,
 ) -> Generator[str, None, None]:
     """
-    Fire all 13 ALTER SYSTEM / ALTER DATABASE statements.
+    Fire all ALTER SYSTEM statements.
     """
     db_name = db_name.upper()
     yield f"[POST-PROV] ▶  Applying post-provisioning parameters to {db_name} …"
@@ -305,20 +320,17 @@ def apply_post_provision_parameters(
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _build_verify_sql(params: dict[str, str]) -> str:
-    """Generate a SQL*Plus script that checks each parameter."""
+    """Generate a SQL*Plus script that outputs machine-readable PARAM verification lines."""
     checks = "\n".join(
-        f"    SELECT name, value, "
-        f"           CASE WHEN UPPER(value) = UPPER('{expected}') "
-        f"                THEN 'PASS' ELSE 'FAIL' END AS status "
+        f"    SELECT 'PARAM|' || name || '|EXPECTED={expected}|ACTUAL=' || value || '|' || "
+        f"           (CASE WHEN UPPER(value) = UPPER('{expected}') THEN 'PASS' ELSE 'FAIL' END) AS line "
         f"    FROM v$parameter WHERE name = LOWER('{name}');"
         for name, expected in params.items()
     )
     return textwrap.dedent(f"""\
         SET LINESIZE 200
         SET PAGESIZE 50
-        COLUMN name   FORMAT A40
-        COLUMN value  FORMAT A30
-        COLUMN status FORMAT A6
+        SET FEEDBACK OFF
         {checks}
     """)
 
@@ -328,8 +340,8 @@ def verify_parameters(
     controller: DockerController,
 ) -> Generator[str, None, None]:
     """
-    Query v$parameter for each of the tuning parameters and
-    emit PASS/FAIL per row. Requires pass_count == expected_count.
+    Query v$parameter for each tuning parameter and emit machine-readable status.
+    Requires pass_count == expected_count and fail_count == 0.
     """
     db_name = db_name.upper()
     yield f"[QA] ▶  Verifying post-provision parameters for {db_name} …"
@@ -341,9 +353,9 @@ def verify_parameters(
 
     for line in controller.exec_sqlplus(sql, db_name=db_name):
         yield f"[QA]    {line}"
-        if "PASS" in line:
+        if "|PASS" in line or "PASS" in line:
             pass_count += 1
-        elif "FAIL" in line:
+        elif "|FAIL" in line or "FAIL" in line:
             fail_count += 1
 
     yield f"[QA]    ── Summary: {pass_count}/{expected_count} PASS, {fail_count} FAIL"

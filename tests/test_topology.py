@@ -33,7 +33,7 @@ def test_clone_sources_loading():
     assert len(sources) >= 1
     prod_source = tm.get_clone_source("cluster-exa-prod01")
     assert prod_source is not None
-    assert prod_source.db_name == "ORD1P"
+    assert prod_source.db_name == "FREE"
     assert prod_source.container_name == "oracle-source"
 
 

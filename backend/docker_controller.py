@@ -120,6 +120,40 @@ class DockerController:
             yield f"[ERROR] Docker execution failed: {exc}"
             raise DockerExecutionError(f"Docker execution failed: {exc}") from exc
 
+    # ──────────────────────────── dynamic discovery & health ─────────────────
+
+    def discover_oracle_environment(self) -> dict[str, str]:
+        """
+        Dynamically discover Oracle environment variables and binary paths from running container.
+        Returns:
+            {"oracle_home": "...", "oracle_sid": "...", "sqlplus": "...", "rman": "...", "dbca": "..."}
+        """
+        env_info = {
+            "oracle_home": "/opt/oracle/product/23c/dbhomeFree",
+            "oracle_sid": "FREE",
+            "sqlplus": "/opt/oracle/product/23c/dbhomeFree/bin/sqlplus",
+            "rman": "/opt/oracle/product/23c/dbhomeFree/bin/rman",
+            "dbca": "/opt/oracle/product/23c/dbhomeFree/bin/dbca",
+        }
+        try:
+            cmd = ["/bin/bash", "-c", "echo $ORACLE_HOME; echo $ORACLE_SID; which sqlplus 2>/dev/null; which rman 2>/dev/null; which dbca 2>/dev/null"]
+            lines = list(self._exec_stream(cmd))
+            if len(lines) >= 1 and lines[0]:
+                env_info["oracle_home"] = lines[0]
+            if len(lines) >= 2 and lines[1]:
+                env_info["oracle_sid"] = lines[1]
+            if len(lines) >= 3 and lines[2]:
+                env_info["sqlplus"] = lines[2]
+            if len(lines) >= 4 and lines[3]:
+                env_info["rman"] = lines[3]
+            if len(lines) >= 5 and lines[4]:
+                env_info["dbca"] = lines[4]
+            else:
+                env_info["dbca"] = ""
+        except Exception as exc:
+            logger.debug("Dynamic discovery fallback for '%s': %s", self.container_name, exc)
+        return env_info
+
     # ──────────────────────────── public API ─────────────────────────────────
 
     def exec_shell(
@@ -152,11 +186,12 @@ class DockerController:
         script_escaped = full_script.replace("'", "'\\''")
         bash_cmd = f"echo '{script_escaped}' | sqlplus -S -L /nolog"
 
-        oracle_home = "/opt/oracle/product/23c/dbhomeFree"
+        env_info = self.discover_oracle_environment()
+        oracle_home = env_info.get("oracle_home", "/opt/oracle/product/23c/dbhomeFree")
         env = {
             "ORACLE_SID": db_name.upper(),
             "ORACLE_HOME": oracle_home,
-            "PATH": f"{oracle_home}/bin:/u01/app/oracle/product/19c/dbhome_1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PATH": f"{oracle_home}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         }
 
         yield f"[SQLPLUS] Connecting to SID={db_name.upper()} {sysdba_flag}"
@@ -169,11 +204,12 @@ class DockerController:
     ) -> Generator[str, None, None]:
         script_escaped = rman_script.replace("'", "'\\''")
         bash_cmd = f"echo '{script_escaped}' | rman target / nocatalog"
-        oracle_home = "/opt/oracle/product/23c/dbhomeFree"
+        env_info = self.discover_oracle_environment()
+        oracle_home = env_info.get("oracle_home", "/opt/oracle/product/23c/dbhomeFree")
         env = {
             "ORACLE_SID": db_name.upper(),
             "ORACLE_HOME": oracle_home,
-            "PATH": f"{oracle_home}/bin:/u01/app/oracle/product/19c/dbhome_1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PATH": f"{oracle_home}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         }
         yield "[RMAN] Starting RMAN session…"
         yield from self._exec_stream(["/bin/bash", "-c", bash_cmd], environment=env)
@@ -181,15 +217,27 @@ class DockerController:
     def health_check(self) -> bool:
         try:
             container = self._get_container()
+            container.reload()
             if container.status != "running":
                 return False
-            # If healthcheck state exists, ensure it is not unhealthy
             health = container.attrs.get("State", {}).get("Health", {}).get("Status")
-            if health and health == "unhealthy":
+            if health in ("starting", "unhealthy"):
                 return False
             return True
         except Exception:
             return False
+
+    def wait_for_oracle_ready(self, timeout: int = 300, interval: int = 5) -> Generator[str, None, None]:
+        import time
+        start = time.time()
+        yield f"[HEALTH] Waiting for Oracle container '{self.container_name}' readiness (timeout={timeout}s)..."
+        while time.time() - start < timeout:
+            if self.health_check():
+                yield f"[HEALTH] ✔ Container '{self.container_name}' is healthy and ready."
+                return
+            yield f"[HEALTH] Container status is starting/busy. Retrying in {interval}s..."
+            time.sleep(interval)
+        raise DockerExecutionError(f"Timed out after {timeout}s waiting for container '{self.container_name}'.")
 
     def close(self) -> None:
         if self._client:
