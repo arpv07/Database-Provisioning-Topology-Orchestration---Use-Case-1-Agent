@@ -53,10 +53,11 @@ def parse_and_validate_node(state: ProvisioningState) -> ProvisioningState:
 
     try:
         req = ProvisionRequest(**req_data)
-        errors = validate_provision_request(req)
-        if errors:
-            logs.append(f"[LANGGRAPH] ✘ Validation failed: {' | '.join(errors)}")
-            return {**state, "status": "validation_failed", "logs": logs, "error": " | ".join(errors)}
+        result = validate_provision_request(req)
+        if not result.valid:
+            error_str = " | ".join(result.errors)
+            logs.append(f"[LANGGRAPH] ✘ Validation failed: {error_str}")
+            return {**state, "status": "validation_failed", "logs": logs, "error": error_str}
     except Exception as exc:
         logs.append(f"[LANGGRAPH] ✘ Schema error: {exc}")
         return {**state, "status": "validation_failed", "logs": logs, "error": str(exc)}

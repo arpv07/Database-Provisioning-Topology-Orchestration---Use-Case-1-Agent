@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 import textwrap
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import Generator
 from typing import Optional
 
 from .docker_controller import DockerController
@@ -178,10 +178,10 @@ _EXPECTED_PARAMS: dict[str, str] = {
 # MODULE 3 – Provisioning Workflows
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def seed_database(
+def seed_database(
     req: ProvisionRequest,
     controller: DockerController,
-) -> AsyncGenerator[str, None]:
+) -> Generator[str, None, None]:
     """
     Workflow 1 – Seed / create-from-scratch.
 
@@ -231,10 +231,10 @@ async def seed_database(
     yield f"[SEED] ✔  Seed build complete for {db_name}."
 
 
-async def clone_database(
+def clone_database(
     req: ProvisionRequest,
     controller: DockerController,
-) -> AsyncGenerator[str, None]:
+) -> Generator[str, None, None]:
     """
     Workflow 2 – Clone / ARS Emulation (RMAN Duplicate).
 
@@ -296,10 +296,10 @@ async def clone_database(
 # MODULE 4 – Post-Provisioning SQL Injection
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def apply_post_provision_parameters(
+def apply_post_provision_parameters(
     db_name: str,
     controller: DockerController,
-) -> AsyncGenerator[str, None]:
+) -> Generator[str, None, None]:
     """
     Fire all 13 ALTER SYSTEM / ALTER DATABASE statements, then
     SHUTDOWN IMMEDIATE followed by STARTUP to apply SPFILE changes.
@@ -336,10 +336,10 @@ def _build_verify_sql(params: dict[str, str]) -> str:
     """)
 
 
-async def verify_parameters(
+def verify_parameters(
     db_name: str,
     controller: DockerController,
-) -> AsyncGenerator[str, None]:
+) -> Generator[str, None, None]:
     """
     Query v$parameter for each of the 12 tuning parameters and
     emit PASS/FAIL per row.
@@ -375,10 +375,10 @@ _RMAN_CATALOG_CHECK_SQL = textwrap.dedent("""\
 """)
 
 
-async def verify_rman_catalog_registration(
+def verify_rman_catalog_registration(
     db_name: str,
     controller: DockerController,
-) -> AsyncGenerator[str, None]:
+) -> Generator[str, None, None]:
     """
     PITR readiness check: confirms the DB appears in the RMAN catalog.
     """
