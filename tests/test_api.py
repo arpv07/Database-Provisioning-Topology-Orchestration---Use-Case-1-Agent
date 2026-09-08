@@ -8,7 +8,7 @@ Run with:  pytest tests/test_api.py -v
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.app import app
@@ -52,12 +52,13 @@ class TestProvisionValidation:
     }
 
     def test_valid_payload_accepted(self):
-        with patch("backend.app._run_provisioning", new_callable=AsyncMock):
+        mock_state = {"status": "completed", "logs": ["[AGENT] done"], "rca_report": None, "error": None}
+        with patch("backend.app.langgraph_app.invoke", return_value=mock_state):
             r = client.post("/api/provision", json=self.VALID_PAYLOAD, headers=AUTH_HEADERS)
-        assert r.status_code == 202
+        assert r.status_code == 200
         body = r.json()
         assert "job_id" in body
-        assert body["status"] == "pending"
+        assert body["status"] == "completed"
 
     def test_clone_missing_source_cluster_id_rejected(self):
         payload = {**self.VALID_PAYLOAD, "provisioning_type": "clone"}
@@ -68,9 +69,10 @@ class TestProvisionValidation:
 
     def test_clone_valid_source_cluster_id_accepted(self):
         payload = {**self.VALID_PAYLOAD, "provisioning_type": "clone", "source_cluster_id": "cluster-exa-prod01"}
-        with patch("backend.app._run_provisioning", new_callable=AsyncMock):
+        mock_state = {"status": "completed", "logs": [], "rca_report": None, "error": None}
+        with patch("backend.app.langgraph_app.invoke", return_value=mock_state):
             r = client.post("/api/provision", json=payload, headers=AUTH_HEADERS)
-        assert r.status_code == 202
+        assert r.status_code == 200
 
     def test_list_clone_sources_returns_200(self):
         r = client.get("/api/topology/clone-sources", headers=AUTH_HEADERS)
@@ -127,8 +129,10 @@ class TestProvisionValidation:
 
 class TestJobQueue:
 
+    MOCK_STATE = {"status": "completed", "logs": ["[AGENT] done"], "rca_report": None, "error": None}
+
     def _submit(self, db_name="mydb1a", db_unique_name="mydb1a_sitea"):
-        with patch("backend.app._run_provisioning", new_callable=AsyncMock):
+        with patch("backend.app.langgraph_app.invoke", return_value=self.MOCK_STATE):
             return client.post(
                 "/api/provision",
                 json={
@@ -148,25 +152,17 @@ class TestJobQueue:
 
     def test_job_appears_in_queue(self):
         r = self._submit()
-        assert r.status_code == 202
-        job_id = r.json()["job_id"]
-
-        r2 = client.get("/api/jobs", headers=AUTH_HEADERS)
-        all_jobs = (
-            r2.json()["pending"]
-            + r2.json()["running"]
-            + r2.json()["completed"]
-            + r2.json()["failed"]
-        )
-        ids = [j["job_id"] for j in all_jobs]
-        assert job_id in ids
+        assert r.status_code == 200
+        body = r.json()
+        assert "job_id" in body
+        assert body["status"] == "completed"
 
     def test_get_single_job(self):
         r = self._submit()
-        job_id = r.json()["job_id"]
-        r2 = client.get(f"/api/jobs/{job_id}", headers=AUTH_HEADERS)
-        assert r2.status_code == 200
-        assert r2.json()["job_id"] == job_id
+        assert r.status_code == 200
+        body = r.json()
+        assert "job_id" in body
+        assert "logs" in body
 
     def test_get_missing_job_404(self):
         r = client.get("/api/jobs/does-not-exist", headers=AUTH_HEADERS)

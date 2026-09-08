@@ -32,18 +32,11 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from .ai_agent import diagnose_provisioning_error, parse_natural_language_intent
-from .docker_controller import DockerController, DockerExecutionError
-from .job_store import JobRecord, job_store
+from .docker_controller import DockerController
+from .job_store import job_store
 from .langgraph_workflow import langgraph_app
 from .topology import topology_manager
 from .validation_engine import ProvisionRequest, validate_provision_request
-from .workflows import (
-    apply_post_provision_parameters,
-    clone_database,
-    seed_database,
-    verify_parameters,
-    verify_rman_catalog_registration,
-)
 
 # ─────────────────────────── logging ─────────────────────────────────────────
 
@@ -116,75 +109,6 @@ class ProvisionPayload(BaseModel):
     is_standby: bool = Field(default=False)
     create_standby: bool = Field(default=False)
     dataguard_enabled: bool = Field(default=False)
-
-
-# ─────────────────────────── Helpers ─────────────────────────────────────────
-
-async def _run_provisioning(job: JobRecord, container_name: str) -> None:
-    """
-    Background coroutine driving the full provisioning pipeline on a target container.
-    Persists log updates into JobStore.
-    """
-    job.status = "running"
-    job.started_at = _now_iso()
-    job_store.update_job(job)
-
-    controller = DockerController(container_name=container_name)
-
-    req = ProvisionRequest(
-        db_name=job.db_name,
-        db_unique_name=job.db_unique_name,
-        target_cluster_id=job.target_cluster_id,
-        source_cluster_id=job.source_cluster_id,
-        provisioning_type=job.provisioning_type,  # type: ignore[arg-type]
-    )
-
-    try:
-        # ── Phase 1: provision (seed or clone) ───────────────────────────────
-        if job.provisioning_type == "seed":
-            workflow = seed_database(req, controller)
-        else:
-            workflow = clone_database(req, controller)
-
-        async for line in workflow:
-            job_store.append_log(job.job_id, line)
-
-        # ── Phase 2: post-provisioning parameters ────────────────────────────
-        async for line in apply_post_provision_parameters(job.db_name, controller):
-            job_store.append_log(job.job_id, line)
-
-        # ── Phase 3: verify parameters ───────────────────────────────────────
-        async for line in verify_parameters(job.db_name, controller):
-            job_store.append_log(job.job_id, line)
-
-        # ── Phase 4: RMAN catalog check ──────────────────────────────────────
-        async for line in verify_rman_catalog_registration(job.db_name, controller):
-            job_store.append_log(job.job_id, line)
-
-        current_job = job_store.get_job(job.job_id)
-        if current_job:
-            current_job.status = "completed"
-            job_store.append_log(job.job_id, f"[AGENT] ✔  Job {job.job_id} completed successfully.")
-            current_job.completed_at = _now_iso()
-            job_store.update_job(current_job)
-
-    except DockerExecutionError as exc:
-        current_job = job_store.get_job(job.job_id)
-        if current_job:
-            current_job.status = "failed"
-            current_job.error = str(exc)
-            job_store.append_log(job.job_id, f"[AGENT] ✘  Docker error: {exc}")
-            current_job.completed_at = _now_iso()
-            job_store.update_job(current_job)
-    except Exception as exc:  # noqa: BLE001
-        current_job = job_store.get_job(job.job_id)
-        if current_job:
-            current_job.status = "failed"
-            current_job.error = str(exc)
-            job_store.append_log(job.job_id, f"[AGENT] ✘  Unexpected error: {exc}")
-            current_job.completed_at = _now_iso()
-            job_store.update_job(current_job)
-        logger.exception("Unhandled error in job %s", job.job_id)
 
 
 # ─────────────────────────── SSE Generator ───────────────────────────────────
@@ -303,10 +227,10 @@ async def ai_langgraph_provision(payload: ProvisionPayload):
     }
 
 
-@app.post("/api/provision", status_code=202, tags=["Provisioning"], dependencies=[Depends(verify_bearer_token)])
+@app.post("/api/provision", tags=["Provisioning"], dependencies=[Depends(verify_bearer_token)])
 async def provision(payload: ProvisionPayload):
     """
-    Enqueue a new provisioning job against a target Exadata cluster.
+    Execute a provisioning job against a target Docker container via LangGraph workflow.
     """
     # ── Resolve target_cluster_id FIRST ──
     try:
@@ -325,14 +249,6 @@ async def provision(payload: ProvisionPayload):
                 ]
             },
         )
-
-    # ── Validate clone source if provisioning_type is clone ──
-    if payload.provisioning_type == "clone":
-        if not payload.source_cluster_id:
-            raise HTTPException(status_code=400, detail={"validation_errors": ["source_cluster_id is required when provisioning_type is 'clone'"]})
-        cs = topology_manager.get_clone_source(payload.source_cluster_id)
-        if not cs:
-            raise HTTPException(status_code=400, detail={"validation_errors": [f"Unknown source_cluster_id '{payload.source_cluster_id}'"]})
 
     req = ProvisionRequest(
         db_name=payload.db_name,
@@ -353,23 +269,26 @@ async def provision(payload: ProvisionPayload):
         raise HTTPException(status_code=400, detail={"validation_errors": result.errors})
 
     job_id = str(uuid.uuid4())
-    job = JobRecord(
-        job_id=job_id,
-        db_name=payload.db_name.upper(),
-        db_unique_name=payload.db_unique_name.upper(),
-        target_cluster_id=payload.target_cluster_id,
-        source_cluster_id=payload.source_cluster_id,
-        provisioning_type=payload.provisioning_type,
-        status="pending",
-        created_at=_now_iso(),
-        logs=[],
-    )
-    job_store.create_job(job)
+    initial_state = {
+        "job_id": job_id,
+        "raw_prompt": None,
+        "request": payload.model_dump(),
+        "status": "pending",
+        "logs": [f"[AGENT] ▶ Initiating provisioning workflow (Job ID: {job_id[:8]})"],
+        "rca_report": None,
+        "error": None,
+    }
 
-    asyncio.create_task(_run_provisioning(job, container_name))
+    logger.info("Starting job %s (%s → %s on %s)", job_id, payload.db_name, payload.provisioning_type, container_name)
+    final_state = langgraph_app.invoke(initial_state)
 
-    logger.info("Enqueued job %s (%s → %s on %s)", job_id, payload.db_name, payload.provisioning_type, container_name)
-    return {"job_id": job_id, "status": "pending"}
+    return {
+        "job_id": job_id,
+        "status": final_state.get("status"),
+        "logs": final_state.get("logs", []),
+        "rca_report": final_state.get("rca_report"),
+        "error": final_state.get("error"),
+    }
 
 
 @app.get("/api/jobs/{job_id}/stream", tags=["Provisioning"])
