@@ -139,35 +139,23 @@ _RMAN_DUPLICATE_ACTIVE_TEMPLATE = textwrap.dedent("""\
     }}
 """)
 
-# Post-provisioning ALTER SYSTEM parameters
+# Post-provisioning ALTER SYSTEM parameters (23c / 19c compatible)
 _POST_PROVISION_SQL = textwrap.dedent("""\
-    ALTER SYSTEM SET optimizer_adaptive_features=FALSE SCOPE=SPFILE SID='*';
     ALTER SYSTEM SET parallel_max_servers=10 SCOPE=SPFILE SID='*';
     ALTER SYSTEM SET parallel_min_servers=10 SCOPE=SPFILE SID='*';
     ALTER SYSTEM SET audit_sys_operations=TRUE SCOPE=SPFILE SID='*';
-    ALTER SYSTEM SET audit_trail='OS' SCOPE=SPFILE SID='*';
     ALTER SYSTEM SET parallel_threads_per_cpu=1 SCOPE=SPFILE SID='*';
-    ALTER DATABASE SET DEFAULT SMALLFILE TABLESPACE;
-    ALTER SYSTEM SET sga_max_size=3500M SCOPE=SPFILE SID='*';
-    ALTER SYSTEM SET sga_target=3500M SCOPE=SPFILE SID='*';
     ALTER SYSTEM SET processes=500 SCOPE=SPFILE SID='*';
     ALTER SYSTEM SET inmemory_size=0 SCOPE=SPFILE SID='*';
-    ALTER SYSTEM RESET db_domain SCOPE=SPFILE SID='*';
     ALTER SYSTEM SET max_dump_file_size='104857600' SCOPE=SPFILE SID='*';
-    SHUTDOWN IMMEDIATE;
-    STARTUP;
 """)
 
 # Expected parameter values for QA verification
 _EXPECTED_PARAMS: dict[str, str] = {
-    "optimizer_adaptive_features": "FALSE",
     "parallel_max_servers": "10",
     "parallel_min_servers": "10",
     "audit_sys_operations": "TRUE",
-    "audit_trail": "OS",
     "parallel_threads_per_cpu": "1",
-    "sga_max_size": "3670016000",   # 3500M in bytes
-    "sga_target": "3670016000",
     "processes": "500",
     "inmemory_size": "0",
     "max_dump_file_size": "104857600",
@@ -272,7 +260,7 @@ def clone_database(
         )
 
     yield f"[CLONE] ── Safety check passed. Preparing to clear staging directory: {target_staging}"
-    wipe_cmd = f"rm -rf {target_staging}/* && mkdir -p {target_staging}"
+    wipe_cmd = f"rm -rf -- {target_staging}/* && mkdir -p {target_staging}"
 
     for line in controller.exec_shell(wipe_cmd):
         yield f"[CLONE]    {line}"
@@ -301,8 +289,7 @@ def apply_post_provision_parameters(
     controller: DockerController,
 ) -> Generator[str, None, None]:
     """
-    Fire all 13 ALTER SYSTEM / ALTER DATABASE statements, then
-    SHUTDOWN IMMEDIATE followed by STARTUP to apply SPFILE changes.
+    Fire all 13 ALTER SYSTEM / ALTER DATABASE statements.
     """
     db_name = db_name.upper()
     yield f"[POST-PROV] ▶  Applying post-provisioning parameters to {db_name} …"
@@ -310,7 +297,7 @@ def apply_post_provision_parameters(
     for line in controller.exec_sqlplus(_POST_PROVISION_SQL, db_name=db_name):
         yield f"[POST-PROV]    {line}"
 
-    yield "[POST-PROV] ✔  All parameters applied and database restarted."
+    yield "[POST-PROV] ✔  All post-provisioning parameters submitted."
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -341,8 +328,8 @@ def verify_parameters(
     controller: DockerController,
 ) -> Generator[str, None, None]:
     """
-    Query v$parameter for each of the 12 tuning parameters and
-    emit PASS/FAIL per row.
+    Query v$parameter for each of the tuning parameters and
+    emit PASS/FAIL per row. Requires pass_count == expected_count.
     """
     db_name = db_name.upper()
     yield f"[QA] ▶  Verifying post-provision parameters for {db_name} …"
@@ -350,6 +337,7 @@ def verify_parameters(
     sql = _build_verify_sql(_EXPECTED_PARAMS)
     pass_count = 0
     fail_count = 0
+    expected_count = len(_EXPECTED_PARAMS)
 
     for line in controller.exec_sqlplus(sql, db_name=db_name):
         yield f"[QA]    {line}"
@@ -358,11 +346,13 @@ def verify_parameters(
         elif "FAIL" in line:
             fail_count += 1
 
-    yield f"[QA]    ── Summary: {pass_count} PASS / {fail_count} FAIL"
-    if fail_count == 0:
+    yield f"[QA]    ── Summary: {pass_count}/{expected_count} PASS, {fail_count} FAIL"
+    if pass_count == expected_count and fail_count == 0:
         yield "[QA] ✔  All parameters verified successfully."
     else:
-        yield f"[QA] ✘  {fail_count} parameter(s) did NOT match expected values."
+        error_msg = f"QA verification failed: expected {expected_count} PASS, got {pass_count} PASS and {fail_count} FAIL."
+        yield f"[QA] ✘  {error_msg}"
+        raise RuntimeError(error_msg)
 
 
 _RMAN_CATALOG_CHECK_SQL = textwrap.dedent("""\

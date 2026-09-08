@@ -13,8 +13,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from .ai_agent import diagnose_provisioning_error, parse_natural_language_intent
-from .docker_controller import DockerController
-
+from .job_store import job_store
 from .topology import topology_manager
 from .validation_engine import ProvisionRequest, validate_provision_request
 from .workflows import (
@@ -25,6 +24,22 @@ from .workflows import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _sync_to_job_store(state: ProvisioningState) -> None:
+    job_id = state.get("job_id")
+    if not job_id:
+        return
+    job = job_store.get_job(job_id)
+    if job:
+        job.status = state.get("status", job.status)
+        job.logs = list(state.get("logs", []))
+        if state.get("error"):
+            job.error = state.get("error")
+        if job.status in ("completed", "failed", "validation_failed"):
+            from datetime import datetime, timezone
+            job.completed_at = datetime.now(timezone.utc).isoformat()
+        job_store.update_job(job)
 
 
 class ProvisioningState(TypedDict):
@@ -57,13 +72,19 @@ def parse_and_validate_node(state: ProvisioningState) -> ProvisioningState:
         if not result.valid:
             error_str = " | ".join(result.errors)
             logs.append(f"[LANGGRAPH] ✘ Validation failed: {error_str}")
-            return {**state, "status": "validation_failed", "logs": logs, "error": error_str}
+            res = {**state, "status": "validation_failed", "logs": logs, "error": error_str}
+            _sync_to_job_store(res)
+            return res
     except Exception as exc:
         logs.append(f"[LANGGRAPH] ✘ Schema error: {exc}")
-        return {**state, "status": "validation_failed", "logs": logs, "error": str(exc)}
+        res = {**state, "status": "validation_failed", "logs": logs, "error": str(exc)}
+        _sync_to_job_store(res)
+        return res
 
     logs.append(f"[LANGGRAPH] ✔ Validation passed for SID={req.db_name}")
-    return {**state, "request": req_data, "logs": logs}
+    res = {**state, "request": req_data, "logs": logs}
+    _sync_to_job_store(res)
+    return res
 
 
 def execute_provision_node(state: ProvisioningState) -> ProvisioningState:
@@ -84,17 +105,23 @@ def execute_provision_node(state: ProvisioningState) -> ProvisioningState:
 
         for line in gen:
             logs.append(line)
+            res_running = {**state, "status": "running", "logs": logs}
+            _sync_to_job_store(res_running)
 
-        return {**state, "status": "provisioned", "logs": logs}
+        res = {**state, "status": "provisioned", "logs": logs}
+        _sync_to_job_store(res)
+        return res
     except Exception as exc:
         logs.append(f"[LANGGRAPH] ✘ Provisioning failed: {exc}")
-        return {**state, "status": "failed", "logs": logs, "error": str(exc)}
+        res = {**state, "status": "failed", "logs": logs, "error": str(exc)}
+        _sync_to_job_store(res)
+        return res
 
 
 def post_provision_tuning_node(state: ProvisioningState) -> ProvisioningState:
-    """Node 3: Applies 13 ALTER SYSTEM post-provisioning parameters & verifies v$parameter."""
+    """Node 3: Applies ALTER SYSTEM post-provisioning parameters & verifies v$parameter."""
     logs = list(state.get("logs", []))
-    logs.append("[LANGGRAPH] ▶ Node 3: Applying 13 post-provisioning tuning parameters...")
+    logs.append("[LANGGRAPH] ▶ Node 3: Applying post-provisioning tuning parameters...")
 
     req_data = state["request"]
     db_name = req_data["db_name"]
@@ -104,14 +131,20 @@ def post_provision_tuning_node(state: ProvisioningState) -> ProvisioningState:
     try:
         for line in apply_post_provision_parameters(db_name, controller):
             logs.append(line)
+            _sync_to_job_store({**state, "status": "running", "logs": logs})
         for line in verify_parameters(db_name, controller):
             logs.append(line)
+            _sync_to_job_store({**state, "status": "running", "logs": logs})
 
         logs.append(f"[LANGGRAPH] ✔ Successfully provisioned and tuned SID={db_name.upper()}")
-        return {**state, "status": "completed", "logs": logs}
+        res = {**state, "status": "completed", "logs": logs}
+        _sync_to_job_store(res)
+        return res
     except Exception as exc:
         logs.append(f"[LANGGRAPH] ✘ Parameter tuning failed: {exc}")
-        return {**state, "status": "failed", "logs": logs, "error": str(exc)}
+        res = {**state, "status": "failed", "logs": logs, "error": str(exc)}
+        _sync_to_job_store(res)
+        return res
 
 
 def ai_rca_diagnostic_node(state: ProvisioningState) -> ProvisioningState:
@@ -123,7 +156,9 @@ def ai_rca_diagnostic_node(state: ProvisioningState) -> ProvisioningState:
     logs.append(f"[LANGGRAPH] [AI RCA] Root Cause: {rca.get('root_cause')}")
     logs.append(f"[LANGGRAPH] [AI RCA] Fix Guidance: {rca.get('recommended_fix')}")
 
-    return {**state, "status": "failed", "logs": logs, "rca_report": rca}
+    res = {**state, "status": "failed", "logs": logs, "rca_report": rca}
+    _sync_to_job_store(res)
+    return res
 
 
 # ─────────────────────────── Conditional Routing ─────────────────────────────

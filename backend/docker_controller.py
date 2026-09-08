@@ -152,10 +152,11 @@ class DockerController:
         script_escaped = full_script.replace("'", "'\\''")
         bash_cmd = f"echo '{script_escaped}' | sqlplus -S -L /nolog"
 
+        oracle_home = "/opt/oracle/product/23c/dbhomeFree"
         env = {
             "ORACLE_SID": db_name.upper(),
-            "ORACLE_HOME": "/u01/app/oracle/product/19c/dbhome_1",
-            "PATH": "/u01/app/oracle/product/19c/dbhome_1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "ORACLE_HOME": oracle_home,
+            "PATH": f"{oracle_home}/bin:/u01/app/oracle/product/19c/dbhome_1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         }
 
         yield f"[SQLPLUS] Connecting to SID={db_name.upper()} {sysdba_flag}"
@@ -168,10 +169,11 @@ class DockerController:
     ) -> Generator[str, None, None]:
         script_escaped = rman_script.replace("'", "'\\''")
         bash_cmd = f"echo '{script_escaped}' | rman target / nocatalog"
+        oracle_home = "/opt/oracle/product/23c/dbhomeFree"
         env = {
             "ORACLE_SID": db_name.upper(),
-            "ORACLE_HOME": "/u01/app/oracle/product/19c/dbhome_1",
-            "PATH": "/u01/app/oracle/product/19c/dbhome_1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "ORACLE_HOME": oracle_home,
+            "PATH": f"{oracle_home}/bin:/u01/app/oracle/product/19c/dbhome_1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         }
         yield "[RMAN] Starting RMAN session…"
         yield from self._exec_stream(["/bin/bash", "-c", bash_cmd], environment=env)
@@ -179,7 +181,13 @@ class DockerController:
     def health_check(self) -> bool:
         try:
             container = self._get_container()
-            return container.status == "running"
+            if container.status != "running":
+                return False
+            # If healthcheck state exists, ensure it is not unhealthy
+            health = container.attrs.get("State", {}).get("Health", {}).get("Status")
+            if health and health == "unhealthy":
+                return False
+            return True
         except Exception:
             return False
 

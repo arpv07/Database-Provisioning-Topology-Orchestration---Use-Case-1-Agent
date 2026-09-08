@@ -41,7 +41,7 @@ async def test_live_seed_workflow_dry_run():
     )
 
     log_lines = []
-    async for line in seed_database(req, ctrl):
+    for line in seed_database(req, ctrl):
         log_lines.append(line)
         if "Invoking DBCA" in line:
             break

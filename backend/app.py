@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from .ai_agent import diagnose_provisioning_error, parse_natural_language_intent
 from .docker_controller import DockerController
-from .job_store import job_store
+from .job_store import JobRecord, job_store
 from .langgraph_workflow import langgraph_app
 from .topology import topology_manager
 from .validation_engine import ProvisionRequest, validate_provision_request
@@ -129,7 +129,7 @@ async def _sse_stream(job_id: str) -> AsyncGenerator[str, None]:
             yield f"data: {payload}\n\n"
             sent_index += 1
 
-        if job.status in ("completed", "failed"):
+        if job.status in ("completed", "failed", "validation_failed"):
             final = json.dumps({"type": "status", "status": job.status, "error": job.error})
             yield f"data: {final}\n\n"
             return
@@ -191,7 +191,7 @@ async def ai_diagnose_log(payload: AIDiagnosePayload):
     return diagnose_provisioning_error(payload.logs)
 
 
-@app.post("/api/ai/langgraph-provision", tags=["AI Agent"], dependencies=[Depends(verify_bearer_token)])
+@app.post("/api/ai/langgraph-provision", status_code=202, tags=["AI Agent"], dependencies=[Depends(verify_bearer_token)])
 async def ai_langgraph_provision(payload: ProvisionPayload):
     """Execute provisioning request through the compiled LangGraph StateGraph workflow engine."""
     container_name = topology_manager.resolve_cluster_container(payload.target_cluster_id)
@@ -208,26 +208,37 @@ async def ai_langgraph_provision(payload: ProvisionPayload):
         )
 
     job_id = str(uuid.uuid4())
+    job = JobRecord(
+        job_id=job_id,
+        db_name=payload.db_name.upper(),
+        db_unique_name=payload.db_unique_name.upper(),
+        target_cluster_id=payload.target_cluster_id,
+        source_cluster_id=payload.source_cluster_id,
+        provisioning_type=payload.provisioning_type,
+        status="pending",
+        created_at=_now_iso(),
+        logs=[f"[LANGGRAPH] ▶ Initiating LangGraph StateGraph Workflow (Job ID: {job_id[:8]})"],
+    )
+    job_store.create_job(job)
+
     initial_state = {
         "job_id": job_id,
         "raw_prompt": None,
         "request": payload.model_dump(),
         "status": "pending",
-        "logs": [f"[LANGGRAPH] ▶ Initiating LangGraph StateGraph Workflow (Job ID: {job_id[:8]})"],
+        "logs": job.logs,
         "rca_report": None,
         "error": None,
     }
-    final_state = langgraph_app.invoke(initial_state)
+    asyncio.create_task(asyncio.to_thread(langgraph_app.invoke, initial_state))
     return {
         "job_id": job_id,
-        "status": final_state.get("status"),
-        "logs": final_state.get("logs", []),
-        "rca_report": final_state.get("rca_report"),
-        "error": final_state.get("error"),
+        "status": "pending",
+        "logs": job.logs,
     }
 
 
-@app.post("/api/provision", tags=["Provisioning"], dependencies=[Depends(verify_bearer_token)])
+@app.post("/api/provision", status_code=202, tags=["Provisioning"], dependencies=[Depends(verify_bearer_token)])
 async def provision(payload: ProvisionPayload):
     """
     Execute a provisioning job against a target Docker container via LangGraph workflow.
@@ -269,25 +280,36 @@ async def provision(payload: ProvisionPayload):
         raise HTTPException(status_code=400, detail={"validation_errors": result.errors})
 
     job_id = str(uuid.uuid4())
+    job = JobRecord(
+        job_id=job_id,
+        db_name=payload.db_name.upper(),
+        db_unique_name=payload.db_unique_name.upper(),
+        target_cluster_id=payload.target_cluster_id,
+        source_cluster_id=payload.source_cluster_id,
+        provisioning_type=payload.provisioning_type,
+        status="pending",
+        created_at=_now_iso(),
+        logs=[f"[AGENT] ▶ Initiating provisioning workflow (Job ID: {job_id[:8]})"],
+    )
+    job_store.create_job(job)
+
     initial_state = {
         "job_id": job_id,
         "raw_prompt": None,
         "request": payload.model_dump(),
         "status": "pending",
-        "logs": [f"[AGENT] ▶ Initiating provisioning workflow (Job ID: {job_id[:8]})"],
+        "logs": job.logs,
         "rca_report": None,
         "error": None,
     }
 
     logger.info("Starting job %s (%s → %s on %s)", job_id, payload.db_name, payload.provisioning_type, container_name)
-    final_state = langgraph_app.invoke(initial_state)
+    asyncio.create_task(asyncio.to_thread(langgraph_app.invoke, initial_state))
 
     return {
         "job_id": job_id,
-        "status": final_state.get("status"),
-        "logs": final_state.get("logs", []),
-        "rca_report": final_state.get("rca_report"),
-        "error": final_state.get("error"),
+        "status": "pending",
+        "logs": job.logs,
     }
 
 
